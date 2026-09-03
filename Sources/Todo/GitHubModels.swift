@@ -17,23 +17,36 @@ struct GitHubLane: Identifiable, Equatable {
 
 // MARK: - GitHub board model
 
+/// Persisted GitHub board snapshot for cache-then-network loading.
+struct CachedGitHubBoard: Codable {
+    let issues: [GitHubIssue]
+    let fetchedAt: Date
+}
+
 final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
     let repo: GitHubRepo
     let account: GitHubAccount
     let client: GitHubClient
+    let cache: BoardCaching?
     let lanes = GitHubLane.all
 
     @Published private(set) var issues: [GitHubIssue] = []
     @Published var lastError: String?
     @Published private(set) var isLoading = false
     @Published var lastUpdated: Date?
+    /// True while the visible content comes from the cache and the
+    /// network refresh is still in flight.
+    @Published private(set) var showingCached = false
 
     /// Active board filter (synced from AppModel.filterText by the view).
     @Published var filterText: String = ""
 
-    init(account: GitHubAccount, repo: GitHubRepo, token: String) {
+    private var cacheKey: String { "github-board-\(repo.id)" }
+
+    init(account: GitHubAccount, repo: GitHubRepo, token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.repo = repo
+        self.cache = cache
         self.client = GitHubClient(credentials: .init(
             baseURL: account.baseURL,
             token: token
@@ -45,12 +58,29 @@ final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
     @MainActor
     func load() async {
         Diag.log.info("github load start repo=\(self.repo.owner)/\(self.repo.repo, privacy: .public)")
+        // Cache-first: publish the last successful fetch immediately so the
+        // board is usable while the network request is in flight.
+        if issues.isEmpty, let cache,
+           let entry = cache.cachedData(for: cacheKey),
+           let snapshot = try? JSONDecoder().decode(CachedGitHubBoard.self, from: entry.data) {
+            issues = snapshot.issues
+            lastUpdated = entry.fetchedAt
+            showingCached = true
+            Diag.log.info("github published cached snapshot issues=\(snapshot.issues.count, privacy: .public)")
+        }
         isLoading = true
         lastError = nil
         do {
             let fetched = try await client.issues(owner: repo.owner, repo: repo.repo)
             issues = fetched
             lastUpdated = Date()
+            showingCached = false
+            if let cache,
+               let payload = try? JSONEncoder().encode(
+                   CachedGitHubBoard(issues: fetched, fetchedAt: lastUpdated!)
+               ) {
+                cache.storeCachedData(payload, for: cacheKey)
+            }
             Diag.log.info("github loaded issues=\(fetched.count)")
         } catch {
             lastError = "\(error.localizedDescription)"
@@ -111,6 +141,28 @@ final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
             _ = try await client.addComment(
                 owner: repo.owner, repo: repo.repo, number: issueNumber, body: body
             )
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    func editComment(id: Int, body: String) async -> Bool {
+        do {
+            _ = try await client.updateComment(
+                owner: repo.owner, repo: repo.repo, id: id, body: body
+            )
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    func deleteComment(id: Int) async -> Bool {
+        do {
+            try await client.deleteComment(owner: repo.owner, repo: repo.repo, id: id)
             return true
         } catch {
             lastError = error.localizedDescription

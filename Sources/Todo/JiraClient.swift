@@ -241,6 +241,25 @@ final class JiraClient {
         }
     }
 
+    func updateComment(key: String, id: String, body: ADFDocument) async throws {
+        let data = try jsonBody(CommentPayload(body: body))
+        let req = try request("PUT", "/rest/api/3/issue/\(key)/comment/\(id)", body: data)
+        let (_, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw JiraError.http(code, "comment update failed")
+        }
+    }
+
+    func deleteComment(key: String, id: String) async throws {
+        let req = try request("DELETE", "/rest/api/3/issue/\(key)/comment/\(id)")
+        let (_, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw JiraError.http(code, "comment delete failed")
+        }
+    }
+
     // MARK: API: assignable users (for @mentions)
 
     func assignableUsers(projectKey: String, query: String? = nil) async throws -> [JiraUser] {

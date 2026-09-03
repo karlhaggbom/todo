@@ -115,6 +115,22 @@ final class GitHubClient {
         return try await send(request("POST", path, body: payload), as: GitHubComment.self)
     }
 
+    @discardableResult
+    func updateComment(owner: String, repo: String, id: Int, body: String) async throws -> GitHubComment {
+        let path = try repoPath(owner: owner, repo: repo) + "/issues/comments/\(id)"
+        let payload = try JSONEncoder().encode(["body": body])
+        return try await send(request("PATCH", path, body: payload), as: GitHubComment.self)
+    }
+
+    func deleteComment(owner: String, repo: String, id: Int) async throws {
+        let path = try repoPath(owner: owner, repo: repo) + "/issues/comments/\(id)"
+        let (_, response) = try await session.data(for: request("DELETE", path))
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw GitHubError.http(code, "comment delete failed")
+        }
+    }
+
     /// Transition an issue between lanes. `stateReason` is only meaningful
     /// when closing ("completed" / "not_planned").
     @discardableResult

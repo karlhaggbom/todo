@@ -20,6 +20,8 @@ struct GitHubIssueDetailView: View {
     @State private var allUsers: [GitHubUser] = []   // collaborators, cached
     @State private var usersLoaded = false
     @State private var mentionFilter: String?       // nil = not in @-mention mode
+    @State private var editingCommentID: Int?
+    @State private var editCommentText = ""
     @State private var mentionSelection = 0         // active row in dropdown
     @State private var mentionKeyMonitor: Any?
     @State private var statusBanner: String?
@@ -125,10 +127,41 @@ struct GitHubIssueDetailView: View {
                                 Text(shortDate(comment.createdAt))
                                     .font(.system(size: 10))
                                     .foregroundStyle(.tertiary)
+                                Spacer()
+                                if editingCommentID == comment.id {
+                                    Text("editing")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.orange)
+                                }
                             }
-                            Text(comment.body.ghAttributed)
-                                .font(.system(size: 12))
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if editingCommentID == comment.id {
+                                TextEditor(text: $editCommentText)
+                                    .font(.system(size: 12))
+                                    .frame(minWidth: 220, minHeight: 44, alignment: .leading)
+                                    .scrollContentBackground(.hidden)
+                                    .padding(4)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .fill(Color(nsColor: .textBackgroundColor))
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                                HStack(spacing: 8) {
+                                    Button("Save") {
+                                        Task { await saveEditedComment(comment) }
+                                    }
+                                    .controlSize(.small)
+                                    .help("Save edited comment (⌘⏎)")
+                                    Button("Cancel") {
+                                        editingCommentID = nil
+                                    }
+                                    .controlSize(.small)
+                                    Spacer()
+                                }
+                            } else {
+                                Text(comment.body.ghAttributed)
+                                    .font(.system(size: 12))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -136,6 +169,15 @@ struct GitHubIssueDetailView: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .fill(Color(nsColor: .textBackgroundColor))
                         )
+                        .contextMenu {
+                            Button("Edit Comment…") {
+                                editCommentText = comment.body
+                                editingCommentID = comment.id
+                            }
+                            Button("Delete Comment", role: .destructive) {
+                                Task { await deleteComment(comment) }
+                            }
+                        }
                     }
                 }
                 .padding(12)
@@ -205,6 +247,7 @@ struct GitHubIssueDetailView: View {
                     Task { await sendComment() }
                 }
                 .controlSize(.small)
+                .help("Send comment (⌘↩)")
             }
             .padding(10)
         }
@@ -304,6 +347,26 @@ struct GitHubIssueDetailView: View {
     private func installMentionKeyMonitor() {
         guard mentionKeyMonitor == nil else { return }
         mentionKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // ⌘Enter sends the comment from anywhere in the composer — even
+            // mid-typing an @mention query, since ⌘ makes the intent explicit.
+            if event.modifierFlags.contains(.command),
+               let chars = event.charactersIgnoringModifiers,
+               chars == "\r" || chars == "\n" {
+                if let id = editingCommentID,
+                   !editCommentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Task { @MainActor in
+                        if let comment = comments.first(where: { $0.id == id }) {
+                            await saveEditedComment(comment)
+                        }
+                    }
+                    return nil
+                }
+                guard !newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return event
+                }
+                Task { @MainActor in await sendComment() }
+                return nil
+            }
             guard mentionFilter != nil else { return event }
             let users = filteredUsers
             guard !users.isEmpty else { return event }
@@ -366,16 +429,62 @@ struct GitHubIssueDetailView: View {
         }
     }
 
+    private func saveEditedComment(_ comment: GitHubComment) async {
+        let text = editCommentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        if await board.editComment(id: comment.id, body: text) {
+            editingCommentID = nil
+            statusBanner = nil
+            if let refreshed = try? await board.client.comments(
+                owner: board.repo.owner, repo: board.repo.repo, number: issue.number
+            ) {
+                comments = refreshed
+            }
+        } else {
+            statusBanner = "Couldn't update comment: \(board.lastError ?? "unknown error")"
+        }
+    }
+
+    private func deleteComment(_ comment: GitHubComment) async {
+        // Optimistic: remove immediately, restore at the same spot on failure.
+        let index = comments.firstIndex { $0.id == comment.id }
+        if let index { comments.remove(at: index) }
+        if await board.deleteComment(id: comment.id) {
+            statusBanner = nil
+        } else {
+            if let index { comments.insert(comment, at: index) }
+            statusBanner = "Couldn't delete comment: \(board.lastError ?? "unknown error")"
+        }
+    }
+
     private func sendComment() async {
         let text = newComment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        // Optimistic: insert immediately, revert on failure.
+        let now = ISO8601DateFormatter().string(from: Date())
+        let optimistic = GitHubComment(
+            id: -Int(Date().timeIntervalSince1970 * 1000),
+            body: text,
+            user: GitHubUser(login: board.account.login, name: nil),
+            createdAt: now,
+            updatedAt: now
+        )
+        comments.append(optimistic)
+        newComment = ""
+        mentionFilter = nil
         if await board.addComment(issueNumber: issue.number, body: text) {
-            newComment = ""
-            mentionFilter = nil
             statusBanner = nil
-            if let refreshed = try? await board.client.comments(owner: board.repo.owner, repo: board.repo.repo, number: issue.number) {
+            // Swap the placeholder for the real comment (proper id) in the
+            // background — the UI is already showing the text above.
+            if let refreshed = try? await board.client.comments(
+                owner: board.repo.owner, repo: board.repo.repo, number: issue.number
+            ) {
                 comments = refreshed
             }
+        } else {
+            comments.removeAll { $0.id == optimistic.id }
+            newComment = text
+            statusBanner = "Couldn't post comment: \(board.lastError ?? "unknown error")"
         }
     }
 

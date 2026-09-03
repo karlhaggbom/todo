@@ -11,18 +11,18 @@ struct JiraBoardView: View {
 
     @StateObject private var board: JiraBoardModelHolder
 
-    init(account: JiraAccount, space: JiraSpace, token: String) {
+    init(account: JiraAccount, space: JiraSpace, token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.space = space
         _board = StateObject(wrappedValue: JiraBoardModelHolder(
-            account: account, space: space, token: token
+            account: account, space: space, token: token, cache: cache
         ))
     }
 
     final class JiraBoardModelHolder: ObservableObject {
         let model: JiraBoardModel
-        init(account: JiraAccount, space: JiraSpace, token: String) {
-            self.model = JiraBoardModel(account: account, space: space, token: token)
+        init(account: JiraAccount, space: JiraSpace, token: String, cache: BoardCaching? = nil) {
+            self.model = JiraBoardModel(account: account, space: space, token: token, cache: cache)
         }
     }
 
@@ -87,9 +87,9 @@ private struct JiraBoardContent: View {
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(Capsule().fill(Color.accentColor.opacity(0.15)))
             if let updated = model.lastUpdated {
-                Text("updated \(updated.formatted(date: .omitted, time: .shortened))")
+                Text("\(model.showingCached ? "cached" : "updated") \(updated.formatted(date: .omitted, time: .shortened))")
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(model.showingCached ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
             }
             Spacer()
             if model.isLoading {
@@ -256,5 +256,6 @@ struct JiraCardView: View {
             RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 1.5)
         )
+        .cardHover()
     }
 }

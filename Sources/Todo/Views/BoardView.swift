@@ -468,6 +468,7 @@ struct TaskCardView: View {
             RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 1.5)
         )
+        .cardHover()
         .background(cardFrameReporter)
     }
 
@@ -548,6 +549,26 @@ struct FilterBar: View {
 }
 
 // MARK: - Instant tap select
+
+/// Subtle hover affordance for board cards: a soft accent border while the
+/// pointer is over the card. Full-strength selection border wins visually.
+/// Instant (no animation) to match the app's interaction model.
+struct CardHover: ViewModifier {
+    @State private var isHovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.accentColor.opacity(isHovered ? 0.45 : 0), lineWidth: 1.5)
+            )
+            .onHover { isHovered = $0 }
+    }
+}
+
+extension View {
+    func cardHover() -> some View { modifier(CardHover()) }
+}
 
 /// Single-click select + double-click detail with no disambiguation delay.
 /// SwiftUI's count-1/count-2 tap pair waits for the double-click window

@@ -104,7 +104,7 @@ struct JiraIssue: Codable, Identifiable, Hashable {
     var id: String { key }
 }
 
-struct JiraStatus: Identifiable, Hashable {
+struct JiraStatus: Identifiable, Hashable, Codable {
     let name: String
     let categoryKey: String // new | indeterminate | done
     var id: String { name }
@@ -118,6 +118,13 @@ struct JiraStatus: Identifiable, Hashable {
         default: return 3
         }
     }
+}
+
+/// Persisted cache behind cache-then-network board loading.
+/// TodoStore conforms; injected into board models so first paint is instant.
+protocol BoardCaching: AnyObject {
+    func cachedData(for key: String) -> (data: Data, fetchedAt: Date)?
+    func storeCachedData(_ data: Data, for key: String)
 }
 
 struct JiraTransition: Codable, Identifiable, Hashable {

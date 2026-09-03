@@ -392,7 +392,7 @@ public struct RootView: View {
         case .jiraSpace(let spaceID):
             if let pair = jiraPair(spaceID: spaceID), let token = jiraTokens[pair.account.id] {
                 boardChrome(
-                    JiraBoardView(account: pair.account, space: pair.space, token: token)
+                    JiraBoardView(account: pair.account, space: pair.space, token: token, cache: store)
                         .id(spaceID), // recreate when switching spaces
                     surface: .jira
                 )
@@ -416,7 +416,7 @@ public struct RootView: View {
         case .githubSpace(let repoID):
             if let pair = gitHubPair(repoID: repoID), let token = githubTokens[pair.account.id] {
                 boardChrome(
-                    GitHubBoardView(account: pair.account, repo: pair.repo, token: token)
+                    GitHubBoardView(account: pair.account, repo: pair.repo, token: token, cache: store)
                         .id(repoID), // recreate when switching repos
                     surface: .github
                 )

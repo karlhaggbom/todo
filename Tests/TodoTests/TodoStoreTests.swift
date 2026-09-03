@@ -399,4 +399,25 @@ import Foundation
         try KeychainStore.saveToken("back", service: store.keychainService, forAccountID: account.id)
         #expect(store.token(forAccount: account.id) == "back")
     }
+
+    @Test func boardCacheRoundTripsAndLatestWins() throws {
+        let store = makeStore()
+        #expect(store.cachedData(for: "jira-board-1") == nil)
+
+        let first = Data("[{\"key\":\"A\"}]".utf8)
+        store.storeCachedData(first, for: "jira-board-1")
+        let before = Date().timeIntervalSince1970
+        #expect(store.cachedData(for: "jira-board-1")?.data == first)
+        #expect((store.cachedData(for: "jira-board-1")?.fetchedAt.timeIntervalSince1970 ?? 0) <= before + 1)
+
+        // Overwrite with a newer payload — INSERT OR REPLACE must replace, not duplicate.
+        let second = Data("[{\"key\":\"B\"},{\"key\":\"C\"}]".utf8)
+        store.storeCachedData(second, for: "jira-board-1")
+        #expect(store.cachedData(for: "jira-board-1")?.data == second)
+
+        // Keys are independent.
+        store.storeCachedData(Data("x".utf8), for: "github-board-1")
+        #expect(store.cachedData(for: "jira-board-1")?.data == second)
+        #expect(store.cachedData(for: "github-board-1")?.data == Data("x".utf8))
+    }
 }

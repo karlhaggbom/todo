@@ -91,6 +91,11 @@ public final class TodoStore: ObservableObject {
             owner TEXT NOT NULL,
             repo TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS board_cache (
+            key TEXT PRIMARY KEY,
+            data BLOB NOT NULL,
+            fetched_at REAL NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_tasks_lane ON tasks(lane_id, position);
         """)
     }
@@ -456,4 +461,27 @@ public final class TodoStore: ObservableObject {
         try db.run("DELETE FROM github_repos WHERE id = ?") { st in st.bind(1, id) }
         githubRepos = try db.query("SELECT * FROM github_repos ORDER BY id", map: Self.gitHubRepo(from:))
     }
+
+    // MARK: - Board cache (cache-then-network payloads)
+
+    func cachedData(for key: String) -> (data: Data, fetchedAt: Date)? {
+        let rows: [(Data, Date)]? = try? db.query(
+            "SELECT data, fetched_at FROM board_cache WHERE key = ?",
+            { st in st.bind(1, key) },
+            map: { st in
+                (st.data("data") ?? Data(), Date(timeIntervalSince1970: st.double("fetched_at")))
+            }
+        )
+        guard let row = rows?.first, !row.0.isEmpty else { return nil }
+        return (row.0, row.1)
+    }
+
+    func storeCachedData(_ data: Data, for key: String) {
+        try? db.run("INSERT OR REPLACE INTO board_cache (key, data, fetched_at) VALUES (?, ?, ?)") { st in
+            st.bind(1, key)
+            st.bind(2, data)
+            st.bind(3, Date().timeIntervalSince1970)
+        }
+    }
 }
+extension TodoStore: BoardCaching {}

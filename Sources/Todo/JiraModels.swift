@@ -3,20 +3,34 @@ import Combine
 
 /// Live model for one Jira Space (project board). Issues are fetched from the
 /// API on load/refresh; not stored locally.
+/// Persisted board snapshot for cache-then-network loading.
+struct CachedJiraBoard: Codable {
+    let statuses: [JiraStatus]
+    let issues: [JiraIssue]
+    let fetchedAt: Date
+}
+
 final class JiraBoardModel: ObservableObject, KeyboardNavigable {
     let space: JiraSpace
     let account: JiraAccount
     let client: JiraClient
+    let cache: BoardCaching?
 
     @Published private(set) var statuses: [JiraStatus] = []
     @Published private(set) var issues: [JiraIssue] = []
     @Published var lastError: String?
     @Published private(set) var isLoading = false
     @Published var lastUpdated: Date?
+    /// True while the visible content comes from the cache and the
+    /// network refresh is still in flight.
+    @Published private(set) var showingCached = false
 
-    init(account: JiraAccount, space: JiraSpace, token: String) {
+    private var cacheKey: String { "jira-board-\(space.id)" }
+
+    init(account: JiraAccount, space: JiraSpace, token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.space = space
+        self.cache = cache
         self.client = JiraClient(credentials: .init(
             baseURL: account.baseURL,
             email: account.email,
@@ -36,6 +50,17 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
     @MainActor
     func load() async {
         Diag.log.info("load start project=\(self.space.projectKey, privacy: .public)")
+        // Cache-first: publish the last successful fetch immediately so the
+        // board is usable while the network request is in flight.
+        if issues.isEmpty, let cache,
+           let entry = cache.cachedData(for: cacheKey),
+           let snapshot = try? JSONDecoder().decode(CachedJiraBoard.self, from: entry.data) {
+            statuses = snapshot.statuses
+            issues = snapshot.issues
+            lastUpdated = entry.fetchedAt
+            showingCached = true
+            Diag.log.info("load published cached snapshot issues=\(snapshot.issues.count, privacy: .public)")
+        }
         isLoading = true
         lastError = nil
         do {
@@ -62,6 +87,13 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
                 )
             } ?? []
             lastUpdated = Date()
+            showingCached = false
+            if let cache,
+               let payload = try? JSONEncoder().encode(
+                   CachedJiraBoard(statuses: statuses, issues: issues, fetchedAt: lastUpdated!)
+               ) {
+                cache.storeCachedData(payload, for: cacheKey)
+            }
             Diag.log.info("load assigned, triggering board render")
         } catch {
             lastError = "\(error.localizedDescription)"
@@ -122,6 +154,26 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
     func addComment(issueKey: String, _ body: ADFDocument) async -> Bool {
         do {
             try await client.addComment(key: issueKey, body: body)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    func editComment(issueKey: String, id: String, body: ADFDocument) async -> Bool {
+        do {
+            try await client.updateComment(key: issueKey, id: id, body: body)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    func deleteComment(issueKey: String, id: String) async -> Bool {
+        do {
+            try await client.deleteComment(key: issueKey, id: id)
             return true
         } catch {
             lastError = error.localizedDescription

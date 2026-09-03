@@ -11,18 +11,18 @@ struct GitHubBoardView: View {
 
     @StateObject private var board: GitHubBoardModelHolder
 
-    init(account: GitHubAccount, repo: GitHubRepo, token: String) {
+    init(account: GitHubAccount, repo: GitHubRepo, token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.repo = repo
         _board = StateObject(wrappedValue: GitHubBoardModelHolder(
-            account: account, repo: repo, token: token
+            account: account, repo: repo, token: token, cache: cache
         ))
     }
 
     final class GitHubBoardModelHolder: ObservableObject {
         let model: GitHubBoardModel
-        init(account: GitHubAccount, repo: GitHubRepo, token: String) {
-            self.model = GitHubBoardModel(account: account, repo: repo, token: token)
+        init(account: GitHubAccount, repo: GitHubRepo, token: String, cache: BoardCaching? = nil) {
+            self.model = GitHubBoardModel(account: account, repo: repo, token: token, cache: cache)
         }
     }
 
@@ -80,9 +80,9 @@ private struct GitHubBoardContent: View {
                 .padding(.horizontal, 6).padding(.vertical, 2)
                 .background(Capsule().fill(Color.accentColor.opacity(0.15)))
             if let updated = model.lastUpdated {
-                Text("updated \(updated.formatted(date: .omitted, time: .shortened))")
+                Text("\(model.showingCached ? "cached" : "updated") \(updated.formatted(date: .omitted, time: .shortened))")
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(model.showingCached ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
             }
             Spacer()
             if model.isLoading {
@@ -240,6 +240,7 @@ struct GitHubCardView: View {
             RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 1.5)
         )
+        .cardHover()
     }
 
     private var labelSummary: String {

@@ -20,6 +20,11 @@ struct TicketDetailView: View {
     @State private var allUsers: [JiraUser] = []   // assignable users, cached
     @State private var usersLoaded = false
     @State private var mentionFilter: String?       // nil = not in @-mention mode
+    @State private var editingCommentID: String?
+    @State private var editCommentText = ""
+    /// Mentions recovered from the comment being edited so untouched
+    /// @Name tokens re-encode as real mention nodes on save.
+    @State private var editMentions: [String: String] = [:]
     @State private var mentionSelection = 0         // active row in dropdown
     @State private var mentionKeyMonitor: Any?
     @State private var attachmentURL: URL?
@@ -130,10 +135,41 @@ struct TicketDetailView: View {
                                         Text(shortDate(comment.created))
                                             .font(.system(size: 10))
                                             .foregroundStyle(.tertiary)
+                                        Spacer()
+                                        if editingCommentID == comment.id {
+                                            Text("editing")
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.orange)
+                                        }
                                     }
-                                    Text(comment.body.attributed)
-                                        .font(.system(size: 12))
-                                        .textSelection(.enabled)
+                                    if editingCommentID == comment.id {
+                                        TextEditor(text: $editCommentText)
+                                            .font(.system(size: 12))
+                                            .frame(minWidth: 220, minHeight: 44, alignment: .leading)
+                                            .scrollContentBackground(.hidden)
+                                            .padding(4)
+                                            .background(
+                                                RoundedRectangle(cornerRadius: 4)
+                                                    .fill(Color(nsColor: .textBackgroundColor))
+                                            )
+                                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        HStack(spacing: 8) {
+                                            Button("Save") {
+                                                Task { await saveEditedComment(comment) }
+                                            }
+                                            .controlSize(.small)
+                                            .help("Save edited comment (⌘⏎)")
+                                            Button("Cancel") {
+                                                editingCommentID = nil
+                                            }
+                                            .controlSize(.small)
+                                            Spacer()
+                                        }
+                                    } else {
+                                        Text(comment.body.attributed)
+                                            .font(.system(size: 12))
+                                            .textSelection(.enabled)
+                                    }
                                 }
                                 .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -141,6 +177,14 @@ struct TicketDetailView: View {
                                     RoundedRectangle(cornerRadius: 6)
                                         .fill(Color(nsColor: .controlBackgroundColor))
                                 )
+                                .contextMenu {
+                                    Button("Edit Comment…") {
+                                        startEditingComment(comment)
+                                    }
+                                    Button("Delete Comment", role: .destructive) {
+                                        Task { await deleteComment(comment) }
+                                    }
+                                }
                             }
                         }
                     }
@@ -205,6 +249,7 @@ struct TicketDetailView: View {
                     Task { await sendComment() }
                 }
                 .controlSize(.small)
+                .help("Send comment (⌘↩)")
             }
             .padding(10)
         }
@@ -305,6 +350,26 @@ struct TicketDetailView: View {
     private func installMentionKeyMonitor() {
         guard mentionKeyMonitor == nil else { return }
         mentionKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // ⌘Enter sends the comment from anywhere in the composer — even
+            // mid-typing an @mention query, since ⌘ makes the intent explicit.
+            if event.modifierFlags.contains(.command),
+               let chars = event.charactersIgnoringModifiers,
+               chars == "\r" || chars == "\n" {
+                if let id = editingCommentID,
+                   !editCommentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Task { @MainActor in
+                        if let comment = comments.first(where: { $0.id == id }) {
+                            await saveEditedComment(comment)
+                        }
+                    }
+                    return nil
+                }
+                guard !newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return event
+                }
+                Task { @MainActor in await sendComment() }
+                return nil
+            }
             guard mentionFilter != nil else { return event }
             let users = filteredUsers
             guard !users.isEmpty else { return event }
@@ -370,18 +435,91 @@ struct TicketDetailView: View {
         }
     }
 
-    private func sendComment() async {
-        let text = newComment.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func startEditingComment(_ comment: JiraCommentPage.Comment) {
+        editCommentText = comment.body.plainText
+        editMentions = Self.mentions(in: comment.body)
+        editingCommentID = comment.id
+    }
+
+    /// displayName → accountID for every mention node in the document, so an
+    /// edited comment preserves untouched mentions as real mention nodes.
+    private static func mentions(in doc: ADFDocument) -> [String: String] {
+        var result: [String: String] = [:]
+        func walk(_ nodes: [ADFNode]?) {
+            for node in nodes ?? [] {
+                if node.type == "mention",
+                   let accountID = node.attrs?["id"]?.stringValue,
+                   let name = (node.attrs?["text"]?.stringValue ?? node.attrs?["displayName"]?.stringValue)?
+                       .trimmingCharacters(in: CharacterSet(charactersIn: "@")) {
+                    result[name] = accountID
+                }
+                walk(node.content)
+            }
+        }
+        walk(doc.content)
+        return result
+    }
+
+    private func saveEditedComment(_ comment: JiraCommentPage.Comment) async {
+        let text = editCommentText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        let doc = ADFBuilder.comment(from: text, mentions: pendingMentions)
-        if await board.addComment(issueKey: issue.key, doc) {
-            newComment = ""
-            pendingMentions = [:]
-            mentionFilter = nil
+        let doc = ADFBuilder.comment(from: text, mentions: editMentions)
+        if await board.editComment(issueKey: issue.key, id: comment.id, body: doc) {
+            editingCommentID = nil
             statusBanner = nil
             if let page = try? await board.client.comments(key: issue.key) {
                 comments = page.comments
             }
+        } else {
+            statusBanner = "Couldn't update comment: \(board.lastError ?? "unknown error")"
+        }
+    }
+
+    private func deleteComment(_ comment: JiraCommentPage.Comment) async {
+        // Optimistic: remove immediately, restore at the same spot on failure.
+        let index = comments.firstIndex { $0.id == comment.id }
+        if let index { comments.remove(at: index) }
+        if await board.deleteComment(issueKey: issue.key, id: comment.id) {
+            statusBanner = nil
+        } else {
+            if let index { comments.insert(comment, at: index) }
+            statusBanner = "Couldn't delete comment: \(board.lastError ?? "unknown error")"
+        }
+    }
+
+    private func sendComment() async {
+        let text = newComment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let doc = ADFBuilder.comment(from: text, mentions: pendingMentions)
+        // Optimistic: insert immediately, revert on failure.
+        let localID = "local-\(UUID().uuidString)"
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
+        let optimistic = JiraCommentPage.Comment(
+            id: localID,
+            author: .init(displayName: "You"),
+            body: doc,
+            created: formatter.string(from: Date())
+        )
+        comments.append(optimistic)
+        let savedMentions = pendingMentions
+        newComment = ""
+        pendingMentions = [:]
+        mentionFilter = nil
+        if await board.addComment(issueKey: issue.key, doc) {
+            statusBanner = nil
+            // Swap the placeholder for the real comment (proper id) in the
+            // background — the UI is already showing the text above.
+            if let page = try? await board.client.comments(key: issue.key) {
+                comments = page.comments
+            }
+        } else {
+            comments.removeAll { $0.id == localID }
+            newComment = text
+            pendingMentions = savedMentions
+            statusBanner = "Couldn't post comment: \(board.lastError ?? "unknown error")"
         }
     }
 
