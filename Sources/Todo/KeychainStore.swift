@@ -3,9 +3,9 @@ import Security
 
 /// API tokens live in the macOS Keychain, never in SQLite.
 ///
-/// Items are keyed by `service` + account ("jira-<rowid>"). The service is
-/// injectable so tests can use a private namespace and never touch the
-/// user's real keychain items.
+/// Items are keyed by `service` + account ("<kind>-<rowid>", e.g.
+/// "jira-3" or "github-3"). The service is injectable so tests can use a
+/// private namespace and never touch the user's real keychain items.
 ///
 /// Note on ACLs: items are owned by the creating process's signing identity.
 /// With ad-hoc signing the identity changes every rebuild, which makes
@@ -16,17 +16,17 @@ import Security
 enum KeychainStore {
     static let defaultService = "todo.jira"
 
-    private static func baseQuery(service: String, forAccountID id: Int64) -> [String: Any] {
+    private static func baseQuery(service: String, kind: String, forAccountID id: Int64) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: "jira-\(id)",
+            kSecAttrAccount as String: "\(kind)-\(id)",
         ]
     }
 
-    static func saveToken(_ token: String, service: String = defaultService, forAccountID id: Int64) throws {
+    static func saveToken(_ token: String, service: String = defaultService, kind: String = "jira", forAccountID id: Int64) throws {
         let data = Data(token.utf8)
-        var query = baseQuery(service: service, forAccountID: id)
+        var query = baseQuery(service: service, kind: kind, forAccountID: id)
         let status = SecItemCopyMatching(query as CFDictionary, nil)
         if status == errSecSuccess {
             let update: [String: Any] = [
@@ -47,8 +47,8 @@ enum KeychainStore {
         }
     }
 
-    static func token(service: String = defaultService, forAccountID id: Int64) throws -> String? {
-        var query = baseQuery(service: service, forAccountID: id)
+    static func token(service: String = defaultService, kind: String = "jira", forAccountID id: Int64) throws -> String? {
+        var query = baseQuery(service: service, kind: kind, forAccountID: id)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
@@ -63,8 +63,9 @@ enum KeychainStore {
         return value.isEmpty ? nil : value
     }
 
-    static func deleteToken(service: String = defaultService, forAccountID id: Int64) throws {
-        let status = SecItemDelete(baseQuery(service: service, forAccountID: id) as CFDictionary)
+    static func deleteToken(service: String = defaultService, kind: String = "jira", forAccountID id: Int64) throws {
+        let query = baseQuery(service: service, kind: kind, forAccountID: id)
+        let status = SecItemDelete(query as CFDictionary)
         if status == errSecSuccess || status == errSecItemNotFound { return }
         // ACL-denied hard delete (e.g. item owned by an earlier build under
         // ad-hoc signing): fall back to clearing the secret. `token` reports
@@ -74,7 +75,7 @@ enum KeychainStore {
             kSecValueData as String: Data(" ".utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
-        let updateStatus = SecItemUpdate(baseQuery(service: service, forAccountID: id) as CFDictionary, update as CFDictionary)
+        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         guard updateStatus == errSecSuccess else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }

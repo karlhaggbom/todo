@@ -329,6 +329,60 @@ import Foundation
         #expect(store.token(forAccount: account.id) == nil, "keychain token must be deleted with the account")
     }
 
+    @Test func addGitHubAccountAndRepoPersistAndTokenRoundTrips() throws {
+        let store = makeStore()
+        let account = try store.addGitHubAccount(
+            name: "GH Work", baseURL: "https://api.github.com",
+            login: "octocat", token: "ghp-abc123"
+        )
+        defer { try? store.deleteGitHubAccount(account.id) }
+
+        #expect(store.githubAccounts.first?.name == "GH Work")
+        #expect(store.githubAccounts.first?.login == "octocat")
+        #expect(store.githubToken(forAccount: account.id) == "ghp-abc123", "GitHub PAT must round-trip through the Keychain")
+
+        let repo = try store.addGitHubRepo(
+            accountID: account.id, name: "Team", owner: "octo-org", repo: "widgets"
+        )
+        #expect(store.githubRepos.first?.id == repo.id)
+        #expect(store.githubRepos.first?.repo == "widgets")
+
+        try store.deleteGitHubRepo(repo.id)
+        #expect(store.githubRepos.isEmpty, "deleted repo must be gone")
+    }
+
+    @Test func deleteGitHubAccountRemovesAccountAndItsRepos() throws {
+        let store = makeStore()
+        let account = try store.addGitHubAccount(
+            name: "GH Work", baseURL: "https://api.github.com",
+            login: "octocat", token: "ghp-xyz"
+        )
+        _ = try store.addGitHubRepo(accountID: account.id, name: "Team", owner: "octo-org", repo: "widgets")
+
+        try store.deleteGitHubAccount(account.id)
+
+        #expect(store.githubAccounts.isEmpty, "account must be gone")
+        #expect(store.githubRepos.isEmpty, "repos must cascade with their account")
+        #expect(store.githubToken(forAccount: account.id) == nil, "keychain token must be deleted with the account")
+    }
+
+    @Test func jiraAndGitHubTokensAreSeparateKeychainItems() throws {
+        // Both use "<kind>-<id>" keys; ids must never collide even when equal.
+        let store = makeStore()
+        let jira = try store.addJiraAccount(
+            name: "J", email: "j@example.com",
+            baseURL: "https://j.example.com", apiToken: "jira-token"
+        )
+        let github = try store.addGitHubAccount(
+            name: "G", baseURL: "https://api.github.com",
+            login: "octocat", token: "gh-token"
+        )
+        defer { try? store.deleteJiraAccount(jira.id); try? store.deleteGitHubAccount(github.id) }
+
+        #expect(store.token(forAccount: jira.id) == "jira-token")
+        #expect(store.githubToken(forAccount: github.id) == "gh-token")
+    }
+
     @Test func softDeletedTokenReadsAsMissing() throws {
         // When a hard delete is ACL-denied (item owned by an earlier build
         // under ad-hoc signing), deleteToken falls back to clearing the

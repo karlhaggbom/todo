@@ -9,6 +9,7 @@ import AppKit
 enum DetailSheetContent {
     case localTask(TodoTask)
     case jiraTicket(account: JiraAccount, board: JiraBoardModel, issue: JiraIssue)
+    case githubIssue(account: GitHubAccount, board: GitHubBoardModel, issue: GitHubIssue)
 }
 
 // MARK: - Keyboard navigation abstraction
@@ -319,4 +320,6 @@ enum SidebarSection: Hashable {
     case local
     case jiraSpace(JiraSpace.ID)
     case jiraMentions(JiraAccount.ID)
+    case githubSpace(GitHubRepo.ID)
+    case githubMentions(GitHubAccount.ID)
 }

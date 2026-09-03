@@ -282,3 +282,78 @@ enum ADFAttrValue: Codable, Hashable {
         }
     }
 }
+// MARK: - GitHub models
+
+struct GitHubAccount: Identifiable, Codable, Equatable, Hashable {
+    var id: Int64
+    var name: String     // display name chosen by user
+    var baseURL: String  // https://api.github.com (or https://host/api/v3 for GHE)
+    var login: String    // the authenticated user's GitHub login
+}
+
+struct GitHubRepo: Identifiable, Codable, Equatable, Hashable {
+    var id: Int64
+    var accountID: Int64
+    var name: String     // display name
+    var owner: String    // repo owner (org or user)
+    var repo: String     // repo name
+}
+
+// MARK: - GitHub API response models
+
+struct GitHubUser: Codable, Identifiable, Hashable {
+    let login: String
+    let name: String?
+
+    var id: String { login }
+}
+
+struct GitHubIssue: Codable, Identifiable, Hashable {
+    let number: Int
+    let title: String
+    let body: String?
+    let state: String                       // "open" | "closed"
+    let stateReason: String?                // "completed" | "not_planned" | "reopened" | nil
+    let htmlURL: String?
+    let updatedAt: String
+    let labels: [GitHubLabel]
+    /// Present (non-nil) when the item is actually a pull request.
+    let pullRequest: GitHubPullRequestMarker?
+
+    var id: Int { number }
+
+    enum CodingKeys: String, CodingKey {
+        case number, title, body, state, labels
+        case stateReason = "state_reason"
+        case htmlURL = "html_url"
+        case updatedAt = "updated_at"
+        case pullRequest = "pull_request"
+    }
+
+    /// The lane this issue belongs to on the board.
+    var laneID: String {
+        if state == "open" { return "open" }
+        return stateReason == "not_planned" ? "not_planned" : "completed"
+    }
+}
+
+struct GitHubLabel: Codable, Hashable {
+    let name: String
+    let color: String
+}
+
+struct GitHubPullRequestMarker: Codable, Hashable {}
+
+struct GitHubComment: Codable, Identifiable, Hashable {
+    let id: Int
+    let body: String
+    let user: GitHubUser
+    let createdAt: String
+    let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, body, user
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}

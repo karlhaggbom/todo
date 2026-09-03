@@ -578,6 +578,7 @@ struct HelpOverlay: View {
     enum Surface {
         case local
         case jira
+        case github
     }
 
     let surface: Surface
@@ -615,6 +616,19 @@ struct HelpOverlay: View {
                 ("?", "toggle this help"),
                 ("Esc", "cancel / clear"),
             ]
+        case .github:
+            [
+                ("j/k, ↓/↑", "cursor down / up"),
+                ("h/l, ←/→", "lane left / right"),
+                ("H/L, ⇧←/⇧→", "move issue to adjacent lane (state change)"),
+                ("Enter", "issue detail"),
+                ("g g / G", "first / last issue"),
+                ("1-9", "jump to lane"),
+                ("⌘1-9", "jump to board"),
+                ("/", "filter issues"),
+                ("?", "toggle this help"),
+                ("Esc", "cancel / clear"),
+            ]
         }
     }
 
@@ -636,7 +650,9 @@ struct HelpOverlay: View {
             }
             Text(surface == .local
                  ? "Drag cards between lanes — flick fast and they lean."
-                 : "H/L performs a live Jira status transition.")
+                 : (surface == .jira
+                    ? "H/L performs a live Jira status transition."
+                    : "H/L changes issue state: Open → Completed → Not Planned."))
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
                 .padding(.top, 4)

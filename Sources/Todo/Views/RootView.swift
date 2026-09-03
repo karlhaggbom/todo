@@ -10,12 +10,23 @@ public struct RootView: View {
     @State private var monitor: Any?
     @State private var showAddAccount = false
     @State private var addSpaceAccount: JiraAccount?
+    @State private var showAddGitHubAccount = false
+    @State private var addRepoAccount: GitHubAccount?
     @State private var newLaneName = ""
     /// Cached Jira API tokens, keyed by account id. Refreshed when the
     /// account list changes so the keychain is never read synchronously
     /// inside `body` (a keychain read is an XPC round-trip and does not
     /// belong in the SwiftUI render path).
     @State private var jiraTokens: [Int64: String] = [:]
+    /// Cached GitHub PATs, same policy as jiraTokens.
+    @State private var githubTokens: [Int64: String] = [:]
+    /// Explicit expansion state for sidebar account groups. The List's
+    /// internal DisclosureGroup bookkeeping collides across sections when
+    /// row ids overlap (Jira account 1 vs GitHub account 1), which made
+    /// expanding one account collapse the other. Owning the state here
+    /// removes the List's buggy machinery from the equation.
+    @State private var expandedJiraAccounts: Set<Int64> = []
+    @State private var expandedGitHubAccounts: Set<Int64> = []
 
     // Local board keyboard adapter.
     @State private var localBoard: LocalBoardModel?
@@ -76,6 +87,12 @@ public struct RootView: View {
         .sheet(item: $addSpaceAccount) { account in
             AddSpaceSheet(account: account)
         }
+        .sheet(isPresented: $showAddGitHubAccount) {
+            AddGitHubAccountSheet()
+        }
+        .sheet(item: $addRepoAccount) { account in
+            AddGitHubRepoSheet(account: account)
+        }
         // Presented from the RootView (not from inside the split view's
         // detail content): sheets presented from the detail area of a
         // NavigationSplitView can corrupt the window's SwiftUI hierarchy on
@@ -85,8 +102,9 @@ public struct RootView: View {
                 detailSheet(content)
             }
         }
-        .onAppear { reloadJiraTokens() }
+        .onAppear { reloadJiraTokens(); reloadGitHubTokens() }
         .onReceive(store.$jiraAccounts) { _ in reloadJiraTokens() }
+        .onReceive(store.$githubAccounts) { _ in reloadGitHubTokens() }
     }
 
     public init() {}
@@ -98,6 +116,8 @@ public struct RootView: View {
             TaskDetailView(task: task)
         case .jiraTicket(let account, let board, let issue):
             TicketDetailView(account: account, board: board, issue: issue)
+        case .githubIssue(let account, let board, let issue):
+            GitHubIssueDetailView(account: account, board: board, issue: issue)
         }
     }
 
@@ -123,6 +143,16 @@ public struct RootView: View {
         jiraTokens = tokens
     }
 
+    private func reloadGitHubTokens() {
+        var tokens: [Int64: String] = [:]
+        for account in store.githubAccounts {
+            if let token = store.githubToken(forAccount: account.id) {
+                tokens[account.id] = token
+            }
+        }
+        githubTokens = tokens
+    }
+
     // MARK: Keyboard monitor
 
     /// Sidebar boards in jump order for ⌘1-9: Local Board, then each
@@ -132,6 +162,11 @@ public struct RootView: View {
         for account in store.jiraAccounts {
             for space in store.jiraSpaces where space.accountID == account.id {
                 sections.append(.jiraSpace(space.id))
+            }
+        }
+        for account in store.githubAccounts {
+            for repo in store.githubRepos where repo.accountID == account.id {
+                sections.append(.githubSpace(repo.id))
             }
         }
         return sections
@@ -155,6 +190,14 @@ public struct RootView: View {
                 }
                 if addSpaceAccount != nil {
                     addSpaceAccount = nil
+                    return nil
+                }
+                if showAddGitHubAccount {
+                    showAddGitHubAccount = false
+                    return nil
+                }
+                if addRepoAccount != nil {
+                    addRepoAccount = nil
                     return nil
                 }
             }
@@ -206,6 +249,18 @@ public struct RootView: View {
                 .buttonStyle(.plain)
             }
 
+            Section("GitHub") {
+                ForEach(store.githubAccounts) { account in
+                    gitHubAccountRows(account)
+                }
+                Button {
+                    showAddGitHubAccount = true
+                } label: {
+                    Label("Add Account…", systemImage: "plus.circle")
+                }
+                .buttonStyle(.plain)
+            }
+
             Section("Local Board") {
                 if model.newLaneFieldVisible {
                     TextField("New lane name", text: $newLaneName, onCommit: {
@@ -239,8 +294,67 @@ public struct RootView: View {
     }
 
     @ViewBuilder
+    private func gitHubAccountRows(_ account: GitHubAccount) -> some View {
+        DisclosureGroup(isExpanded: githubExpansion(account.id)) {
+            ForEach(store.githubRepos.filter { $0.accountID == account.id }) { repo in
+                Label(repo.name, systemImage: "rectangle.stack")
+                    .tag(SidebarSection.githubSpace(repo.id))
+                    .contextMenu {
+                        Button("Remove Repo") {
+                            _ = try? store.deleteGitHubRepo(repo.id)
+                            if case .githubSpace(repo.id) = model.selectedSidebarSection {
+                                model.selectedSidebarSection = .local
+                            }
+                        }
+                    }
+            }
+            Label("Mentions", systemImage: "person.crop.circle.badge.exclamationmark")
+                .tag(SidebarSection.githubMentions(account.id))
+            Button {
+                addRepoAccount = account
+            } label: {
+                Label("Add Repo…", systemImage: "plus")
+            }
+            .buttonStyle(.plain)
+        } label: {
+            Label(account.name, systemImage: "globe")
+                .contextMenu {
+                    Button("Delete Account") {
+                        _ = try? store.deleteGitHubAccount(account.id)
+                        switch model.selectedSidebarSection {
+                        case .githubMentions(account.id):
+                            model.selectedSidebarSection = .local
+                        case .githubSpace(let repoID):
+                            // Reset if the deleted account owns the open board.
+                            if !store.githubRepos.contains(where: { $0.id == repoID }) {
+                                model.selectedSidebarSection = .local
+                            }
+                        default:
+                            break
+                        }
+                    }
+                }
+        }
+        .id("github-account-\(account.id)")
+    }
+
+    private func jiraExpansion(_ id: Int64) -> Binding<Bool> {
+        Binding(
+            get: { expandedJiraAccounts.contains(id) },
+            set: { if $0 { expandedJiraAccounts.insert(id) } else { expandedJiraAccounts.remove(id) } }
+        )
+    }
+
+    private func githubExpansion(_ id: Int64) -> Binding<Bool> {
+        Binding(
+            get: { expandedGitHubAccounts.contains(id) },
+            set: { if $0 { expandedGitHubAccounts.insert(id) } else { expandedGitHubAccounts.remove(id) } }
+        )
+    }
+
+    @ViewBuilder
     private func accountRows(_ account: JiraAccount) -> some View {
-        DisclosureGroup {
+        DisclosureGroup(isExpanded: jiraExpansion(account.id)) {
             ForEach(store.jiraSpaces.filter { $0.accountID == account.id }) { space in
                 Label(space.name, systemImage: "rectangle.stack")
                     .tag(SidebarSection.jiraSpace(space.id))
@@ -264,6 +378,7 @@ public struct RootView: View {
                 }
             }
         }
+        .id("jira-account-\(account.id)")
     }
 
     // MARK: Detail
@@ -297,6 +412,34 @@ public struct RootView: View {
                     description: Text("Add a Space (project) to this account to see mentions.")
                 )
             }
+
+        case .githubSpace(let repoID):
+            if let pair = gitHubPair(repoID: repoID), let token = githubTokens[pair.account.id] {
+                boardChrome(
+                    GitHubBoardView(account: pair.account, repo: pair.repo, token: token)
+                        .id(repoID), // recreate when switching repos
+                    surface: .github
+                )
+            } else {
+                ContentUnavailableView("Repo unavailable", systemImage: "questionmark.circle")
+            }
+
+        case .githubMentions(let accountID):
+            if let account = store.githubAccounts.first(where: { $0.id == accountID }),
+               let token = githubTokens[accountID] {
+                let repos = store.githubRepos.filter { $0.accountID == accountID }
+                if repos.isEmpty {
+                    ContentUnavailableView(
+                        "No Repo",
+                        systemImage: "rectangle.stack.badge.plus",
+                        description: Text("Add a Repo to this account to see mentions.")
+                    )
+                } else {
+                    GitHubMentionsView(account: account, repos: repos, token: token)
+                }
+            } else {
+                ContentUnavailableView("Account unavailable", systemImage: "questionmark.circle")
+            }
         }
     }
 
@@ -317,5 +460,13 @@ public struct RootView: View {
             return nil
         }
         return (account, space)
+    }
+
+    private func gitHubPair(repoID: Int64) -> (account: GitHubAccount, repo: GitHubRepo)? {
+        guard let repo = store.githubRepos.first(where: { $0.id == repoID }),
+              let account = store.githubAccounts.first(where: { $0.id == repo.accountID }) else {
+            return nil
+        }
+        return (account, repo)
     }
 }

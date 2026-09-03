@@ -8,6 +8,8 @@ public final class TodoStore: ObservableObject {
     @Published private(set) var tasks: [TodoTask] = []
     @Published private(set) var jiraAccounts: [JiraAccount] = []
     @Published private(set) var jiraSpaces: [JiraSpace] = []
+    @Published private(set) var githubAccounts: [GitHubAccount] = []
+    @Published private(set) var githubRepos: [GitHubRepo] = []
 
     let db: SQLiteDatabase
     /// Keychain namespace for API tokens. Tests inject a private service so
@@ -76,6 +78,19 @@ public final class TodoStore: ObservableObject {
             project_key TEXT NOT NULL,
             jql TEXT
         );
+        CREATE TABLE IF NOT EXISTS github_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            login TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS github_repos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES github_accounts(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            repo TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_tasks_lane ON tasks(lane_id, position);
         """)
     }
@@ -105,6 +120,8 @@ public final class TodoStore: ObservableObject {
         tasks = try db.query("SELECT * FROM tasks ORDER BY position", map: Self.task(from:))
         jiraAccounts = try db.query("SELECT * FROM jira_accounts ORDER BY id", map: Self.account(from:))
         jiraSpaces = try db.query("SELECT * FROM jira_spaces ORDER BY id", map: Self.space(from:))
+        githubAccounts = try db.query("SELECT * FROM github_accounts ORDER BY id", map: Self.gitHubAccount(from:))
+        githubRepos = try db.query("SELECT * FROM github_repos ORDER BY id", map: Self.gitHubRepo(from:))
     }
 
     private static func lane(from st: SQLiteDatabase.Statement) -> Lane {
@@ -131,6 +148,14 @@ public final class TodoStore: ObservableObject {
 
     private static func space(from st: SQLiteDatabase.Statement) -> JiraSpace {
         JiraSpace(id: st.int("id"), accountID: st.int("account_id"), name: st.string("name"), projectKey: st.string("project_key"), jql: st.optionalString("jql"))
+    }
+
+    private static func gitHubAccount(from st: SQLiteDatabase.Statement) -> GitHubAccount {
+        GitHubAccount(id: st.int("id"), name: st.string("name"), baseURL: st.string("base_url"), login: st.string("login"))
+    }
+
+    private static func gitHubRepo(from st: SQLiteDatabase.Statement) -> GitHubRepo {
+        GitHubRepo(id: st.int("id"), accountID: st.int("account_id"), name: st.string("name"), owner: st.string("owner"), repo: st.string("repo"))
     }
 
     // MARK: - Derived
@@ -389,5 +414,46 @@ public final class TodoStore: ObservableObject {
     func deleteJiraSpace(_ id: Int64) throws {
         try db.run("DELETE FROM jira_spaces WHERE id = ?") { st in st.bind(1, id) }
         jiraSpaces = try db.query("SELECT * FROM jira_spaces ORDER BY id", map: Self.space(from:))
+    }
+
+    // MARK: - GitHub accounts & repos
+
+    @discardableResult
+    func addGitHubAccount(name: String, baseURL: String, login: String, token: String) throws -> GitHubAccount {
+        try db.run("INSERT INTO github_accounts (name, base_url, login) VALUES (?, ?, ?)") { st in
+            st.bind(1, name); st.bind(2, baseURL); st.bind(3, login)
+        }
+        let id = db.lastInsertRowID
+        try KeychainStore.saveToken(token, service: keychainService, kind: "github", forAccountID: id)
+        githubAccounts = try db.query("SELECT * FROM github_accounts ORDER BY id", map: Self.gitHubAccount(from:))
+        return githubAccounts.first { $0.id == id }!
+    }
+
+    func deleteGitHubAccount(_ id: Int64) throws {
+        try db.run("DELETE FROM github_accounts WHERE id = ?") { st in st.bind(1, id) }
+        try? KeychainStore.deleteToken(service: keychainService, kind: "github", forAccountID: id)
+        try reloadAll()
+    }
+
+    func githubToken(forAccount id: Int64) -> String? {
+        try? KeychainStore.token(service: keychainService, kind: "github", forAccountID: id)
+    }
+
+    @discardableResult
+    func addGitHubRepo(accountID: Int64, name: String, owner: String, repo: String) throws -> GitHubRepo {
+        try db.run("INSERT INTO github_repos (account_id, name, owner, repo) VALUES (?, ?, ?, ?)") { st in
+            st.bind(1, accountID)
+            st.bind(2, name)
+            st.bind(3, owner)
+            st.bind(4, repo)
+        }
+        let id = db.lastInsertRowID
+        githubRepos = try db.query("SELECT * FROM github_repos ORDER BY id", map: Self.gitHubRepo(from:))
+        return githubRepos.first { $0.id == id }!
+    }
+
+    func deleteGitHubRepo(_ id: Int64) throws {
+        try db.run("DELETE FROM github_repos WHERE id = ?") { st in st.bind(1, id) }
+        githubRepos = try db.query("SELECT * FROM github_repos ORDER BY id", map: Self.gitHubRepo(from:))
     }
 }
