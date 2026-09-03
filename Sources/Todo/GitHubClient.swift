@@ -108,11 +108,22 @@ final class GitHubClient {
         return try await send(request("GET", path), as: [GitHubComment].self)
     }
 
+    /// Post a comment. Returns the server-rendered comment when the
+    /// response decodes. A 2xx status means the post succeeded — a decode
+    /// miss returns nil but must NOT be treated as a failed post.
     @discardableResult
-    func addComment(owner: String, repo: String, number: Int, body: String) async throws -> GitHubComment {
+    func addComment(owner: String, repo: String, number: Int, body: String) async throws -> GitHubComment? {
         let path = try repoPath(owner: owner, repo: repo) + "/issues/\(number)/comments"
         let payload = try JSONEncoder().encode(["body": body])
-        return try await send(request("POST", path, body: payload), as: GitHubComment.self)
+        let req = try request("POST", path, body: payload)
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let message = (try? JSONDecoder().decode([String: String].self, from: data))?["message"]
+                ?? String(data: data, encoding: .utf8) ?? ""
+            throw GitHubError.http(code, message)
+        }
+        return try? JSONDecoder().decode(GitHubComment.self, from: data)
     }
 
     @discardableResult

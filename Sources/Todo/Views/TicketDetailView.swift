@@ -508,12 +508,15 @@ struct TicketDetailView: View {
         newComment = ""
         pendingMentions = [:]
         mentionFilter = nil
-        if await board.addComment(issueKey: issue.key, doc) {
+        let result = await board.addComment(issueKey: issue.key, doc)
+        if result.accepted {
             statusBanner = nil
-            // Swap the placeholder for the real comment (proper id) in the
-            // background — the UI is already showing the text above.
-            if let page = try? await board.client.comments(key: issue.key) {
-                comments = page.comments
+            // Swap the placeholder for the server-rendered comment (real id);
+            // if the response didn't decode, keep the placeholder — the
+            // server confirmed the post, so it must never be removed here.
+            if let created = result.created,
+               let index = comments.firstIndex(where: { $0.id == localID }) {
+                comments[index] = created
             }
         } else {
             comments.removeAll { $0.id == localID }

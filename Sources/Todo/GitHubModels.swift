@@ -136,15 +136,19 @@ final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
     }
 
     @MainActor
-    func addComment(issueNumber: Int, body: String) async -> Bool {
+    /// `accepted` mirrors the HTTP status: true means the server stored the
+    /// comment. `created` is the server-rendered replacement for the local
+    /// placeholder, or nil if the response didn't decode (keep placeholder).
+    func addComment(issueNumber: Int, body: String) async -> (accepted: Bool, created: GitHubComment?) {
         do {
-            _ = try await client.addComment(
+            let created = try await client.addComment(
                 owner: repo.owner, repo: repo.repo, number: issueNumber, body: body
             )
-            return true
+            return (true, created)
         } catch {
+            Diag.log.error("github addComment failed: \(error.localizedDescription, privacy: .public)")
             lastError = error.localizedDescription
-            return false
+            return (false, nil)
         }
     }
 

@@ -231,14 +231,18 @@ final class JiraClient {
         let body: ADFDocument
     }
 
-    func addComment(key: String, body: ADFDocument) async throws {
+    /// Post a comment. Returns the server-rendered comment when the
+    /// response decodes; a 2xx status means the post succeeded regardless.
+    @discardableResult
+    func addComment(key: String, body: ADFDocument) async throws -> JiraCommentPage.Comment? {
         let data = try jsonBody(CommentPayload(body: body))
         let req = try request("POST", "/rest/api/3/issue/\(key)/comment", body: data)
-        let (_, response) = try await session.data(for: req)
+        let (responseData, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw JiraError.http(code, "comment failed")
         }
+        return try? JSONDecoder().decode(JiraCommentPage.Comment.self, from: responseData)
     }
 
     func updateComment(key: String, id: String, body: ADFDocument) async throws {

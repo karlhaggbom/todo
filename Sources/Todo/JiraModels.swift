@@ -151,13 +151,17 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
     }
 
     @MainActor
-    func addComment(issueKey: String, _ body: ADFDocument) async -> Bool {
+    /// `accepted` mirrors the HTTP status: true means the server stored the
+    /// comment. `created` is the server-rendered replacement for the local
+    /// placeholder, or nil if the response didn't decode (keep placeholder).
+    func addComment(issueKey: String, _ body: ADFDocument) async -> (accepted: Bool, created: JiraCommentPage.Comment?) {
         do {
-            try await client.addComment(key: issueKey, body: body)
-            return true
+            let created = try await client.addComment(key: issueKey, body: body)
+            return (true, created)
         } catch {
+            Diag.log.error("jira addComment failed: \(error.localizedDescription, privacy: .public)")
             lastError = error.localizedDescription
-            return false
+            return (false, nil)
         }
     }
 

@@ -472,14 +472,15 @@ struct GitHubIssueDetailView: View {
         comments.append(optimistic)
         newComment = ""
         mentionFilter = nil
-        if await board.addComment(issueNumber: issue.number, body: text) {
+        let result = await board.addComment(issueNumber: issue.number, body: text)
+        if result.accepted {
             statusBanner = nil
-            // Swap the placeholder for the real comment (proper id) in the
-            // background — the UI is already showing the text above.
-            if let refreshed = try? await board.client.comments(
-                owner: board.repo.owner, repo: board.repo.repo, number: issue.number
-            ) {
-                comments = refreshed
+            // Swap the placeholder for the server-rendered comment (real id);
+            // if the response didn't decode, keep the placeholder — the
+            // server confirmed the post, so it must never be removed here.
+            if let created = result.created,
+               let index = comments.firstIndex(where: { $0.id == optimistic.id }) {
+                comments[index] = created
             }
         } else {
             comments.removeAll { $0.id == optimistic.id }
