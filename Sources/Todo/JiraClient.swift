@@ -139,6 +139,22 @@ final class JiraClient {
         return try await send(req, as: SearchResponse.self)
     }
 
+    /// Project key of the first issue matching the board's JQL. Custom-JQL
+    /// boards (e.g. `sprint in openSprints()`) don't name a project, so the
+    /// stored project key may not match — or may not even exist in Jira.
+    /// Resolving from the board's own issues guarantees a valid key.
+    func boardProjectKey(jql: String) async throws -> String? {
+        struct Lookup: Decodable {
+            struct Item: Decodable { let fields: Fields }
+            struct Fields: Decodable { let project: Project }
+            struct Project: Decodable { let key: String }
+            let issues: [Item]?
+        }
+        let body = try jsonBody(SearchRequest(jql: jql, maxResults: 1, fields: ["project"], nextPageToken: nil))
+        let req = try request("POST", "/rest/api/3/search/jql", body: body)
+        return try await send(req, as: Lookup.self).issues?.first?.fields.project.key
+    }
+
     // MARK: API: statuses for a project (lane fallback)
 
     // GET /rest/api/3/project/{key}/statuses returns a *top-level array*
@@ -261,6 +277,76 @@ final class JiraClient {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw JiraError.http(code, "comment delete failed")
+        }
+    }
+
+    // MARK: API: create issue + metadata (priority, sprint)
+
+    struct JiraPriority: Codable, Identifiable, Hashable {
+        let id: String
+        let name: String
+    }
+
+    func priorities() async throws -> [JiraPriority] {
+        let req = try request("GET", "/rest/api/3/priority")
+        return try await send(req, as: [JiraPriority].self)
+    }
+
+    struct JiraBoardsPage: Codable {
+        struct Board: Codable { let id: Int; let name: String }
+        let values: [Board]
+    }
+
+    struct JiraSprintsPage: Codable {
+        struct Sprint: Codable, Identifiable, Hashable {
+            let id: Int
+            let name: String
+            let state: String
+        }
+        let values: [Sprint]
+    }
+
+    /// The sprint currently active in any board of the project, if one is
+    /// running. Used to pre-select the sprint when creating an issue.
+    /// Kanban-style boards answer 400 "does not support sprints" — they're
+    /// skipped, not fatal.
+    func activeSprint(projectKey: String) async throws -> JiraSprintsPage.Sprint? {
+        let req = try request("GET", "/rest/agile/1.0/board?projectKeyOrId=\(projectKey)")
+        let boards = try await send(req, as: JiraBoardsPage.self).values
+        for board in boards {
+            let sprintReq = try request("GET", "/rest/agile/1.0/board/\(board.id)/sprint?state=active")
+            guard let page = try? await send(sprintReq, as: JiraSprintsPage.self) else { continue }
+            if let sprint = page.values.first { return sprint }
+        }
+        return nil
+    }
+
+    struct JiraCreateFields: Encodable {
+        let project: [String: String]
+        let summary: String
+        let issuetype: [String: String]
+        let description: ADFDocument
+        var assignee: [String: String]?
+        var priority: [String: String]?
+    }
+
+    struct JiraCreateResponse: Codable { let id: String; let key: String }
+
+    func createIssue(fields: JiraCreateFields) async throws -> JiraCreateResponse {
+        struct CreateBody: Encodable { let fields: JiraCreateFields }
+        let data = try jsonBody(CreateBody(fields: fields))
+        let req = try request("POST", "/rest/api/3/issue", body: data)
+        return try await send(req, as: JiraCreateResponse.self)
+    }
+
+    func addIssueToSprint(sprintID: Int, issueKey: String) async throws {
+        struct Payload: Encodable { let issues: [String] }
+        let data = try jsonBody(Payload(issues: [issueKey]))
+        let req = try request("POST", "/rest/agile/1.0/sprint/\(sprintID)/issue", body: data)
+        let (_, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw JiraError.http(code, "add to sprint failed")
         }
     }
 

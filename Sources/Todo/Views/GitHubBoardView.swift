@@ -59,6 +59,14 @@ private struct GitHubBoardContent: View {
                     DetailSheetContent.githubIssue(account: account, board: model, issue: $0)
                 }
             }
+            appModel.createIssueHandler = { [weak model] in
+                if let model {
+                    appModel.createTarget = CreateIssueTarget(content: .githubIssue(account: account, board: model))
+                }
+            }
+        }
+        .onDisappear {
+            appModel.createIssueHandler = nil
         }
         .onChange(of: appModel.filterText) { model.filterText = $0 }
     }
@@ -89,6 +97,14 @@ private struct GitHubBoardContent: View {
                 ProgressView()
                     .controlSize(.small)
             }
+            Button {
+                appModel.createTarget = CreateIssueTarget(content: .githubIssue(account: account, board: model))
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.borderless)
+            .help("New issue (n)")
             Button {
                 Task { await model.refresh() }
             } label: {

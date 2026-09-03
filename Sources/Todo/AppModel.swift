@@ -12,6 +12,17 @@ enum DetailSheetContent {
     case githubIssue(account: GitHubAccount, board: GitHubBoardModel, issue: GitHubIssue)
 }
 
+/// Create-issue sheet target: the board model is passed so the sheet can
+/// insert the created issue directly, presented from the RootView level.
+struct CreateIssueTarget: Identifiable {
+    enum Content {
+        case jiraIssue(account: JiraAccount, board: JiraBoardModel)
+        case githubIssue(account: GitHubAccount, board: GitHubBoardModel)
+    }
+    let id = UUID()
+    let content: Content
+}
+
 // MARK: - Keyboard navigation abstraction
 
 /// A surface that can be driven by Vimium-style keys.
@@ -121,6 +132,12 @@ public final class AppModel: ObservableObject {
     /// macOS 15 (the whole window's SwiftUI content can vanish).
     var resolveDetail: ((CursorPosition) -> DetailSheetContent?)? = nil
 
+    /// Create-issue sheet, presented from RootView.
+    @Published var createTarget: CreateIssueTarget?
+    /// Set by the active board view (like `navigable`); the "c" key invokes it.
+    /// nil on the local board (which already has quick-add via "n").
+    var createIssueHandler: (() -> Void)? = nil
+
     /// The currently active navigable surface (local board or a Jira board).
     var navigable: (() -> KeyboardNavigable?)? = nil
 
@@ -208,7 +225,11 @@ public final class AppModel: ObservableObject {
         case "n":
             if shift {
                 newLaneFieldVisible.toggle()
+            } else if let createIssueHandler {
+                // Jira/GitHub boards: the create-issue sheet.
+                createIssueHandler()
             } else {
+                // Local board: inline quick-add in the current lane.
                 quickAddLane = quickAddLane == selectedLane ? nil : selectedLane
             }
         case "e":

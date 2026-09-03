@@ -165,6 +165,15 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
         }
     }
 
+    /// Insert a freshly created issue at the top of the board (newest
+    /// updated first) and make sure its status lane exists.
+    func insertCreated(_ issue: JiraIssue) {
+        issues.insert(issue, at: 0)
+        if !statuses.contains(where: { $0.name == issue.fields.status.name }) {
+            statuses.append(JiraStatus(name: issue.fields.status.name, categoryKey: issue.fields.status.statusCategory.key))
+        }
+    }
+
     func editComment(issueKey: String, id: String, body: ADFDocument) async -> Bool {
         do {
             try await client.updateComment(key: issueKey, id: id, body: body)

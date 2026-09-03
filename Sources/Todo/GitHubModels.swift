@@ -152,6 +152,11 @@ final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
         }
     }
 
+    /// Insert a freshly created issue at the top of the board.
+    func insertCreated(_ issue: GitHubIssue) {
+        issues.insert(issue, at: 0)
+    }
+
     func editComment(id: Int, body: String) async -> Bool {
         do {
             _ = try await client.updateComment(

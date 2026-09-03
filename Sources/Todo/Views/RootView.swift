@@ -102,6 +102,14 @@ public struct RootView: View {
                 detailSheet(content)
             }
         }
+        .sheet(item: $model.createTarget) { target in
+            switch target.content {
+            case .jiraIssue(let account, let board):
+                CreateIssueSheet(account: account, board: board)
+            case .githubIssue(let account, let board):
+                CreateGitHubIssueSheet(account: account, board: board)
+            }
+        }
         .onAppear { reloadJiraTokens(); reloadGitHubTokens() }
         .onReceive(store.$jiraAccounts) { _ in reloadJiraTokens() }
         .onReceive(store.$githubAccounts) { _ in reloadGitHubTokens() }
@@ -182,6 +190,10 @@ public struct RootView: View {
                !(event.window?.firstResponder is NSTextView) {
                 if model.detailTarget != nil {
                     model.detailTarget = nil
+                    return nil
+                }
+                if model.createTarget != nil {
+                    model.createTarget = nil
                     return nil
                 }
                 if showAddAccount {

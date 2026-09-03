@@ -66,6 +66,14 @@ private struct JiraBoardContent: View {
                     DetailSheetContent.jiraTicket(account: account, board: model, issue: $0)
                 }
             }
+            appModel.createIssueHandler = { [weak model] in
+                if let model {
+                    appModel.createTarget = CreateIssueTarget(content: .jiraIssue(account: account, board: model))
+                }
+            }
+        }
+        .onDisappear {
+            appModel.createIssueHandler = nil
         }
         .onChange(of: appModel.filterText) { model.filterText = $0 }
     }
@@ -96,6 +104,14 @@ private struct JiraBoardContent: View {
                 ProgressView()
                     .controlSize(.small)
             }
+            Button {
+                appModel.createTarget = CreateIssueTarget(content: .jiraIssue(account: account, board: model))
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.borderless)
+            .help("New issue (n)")
             Button {
                 Task { await model.refresh() }
             } label: {

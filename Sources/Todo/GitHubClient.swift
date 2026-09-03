@@ -142,6 +142,22 @@ final class GitHubClient {
         }
     }
 
+    /// Create an issue. Assignees require users who can be assigned in the
+    /// repo (collaborators); empty list leaves the issue unassigned.
+    @discardableResult
+    func createIssue(owner: String, repo: String, title: String, body: String?, assignees: [String]) async throws -> GitHubIssue {
+        struct CreatePayload: Encodable {
+            let title: String
+            let body: String?
+            let assignees: [String]?
+        }
+        let path = try repoPath(owner: owner, repo: repo) + "/issues"
+        let payload = try JSONEncoder().encode(
+            CreatePayload(title: title, body: body, assignees: assignees.isEmpty ? nil : assignees)
+        )
+        return try await send(request("POST", path, body: payload), as: GitHubIssue.self)
+    }
+
     /// Transition an issue between lanes. `stateReason` is only meaningful
     /// when closing ("completed" / "not_planned").
     @discardableResult
