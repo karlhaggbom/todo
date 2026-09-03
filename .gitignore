@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+._*
+Icon?
+
+# Swift Package Manager / SwiftPM
+# (Package.resolved is intentionally tracked — it's an app lockfile)
+.build/
+swiftpm/
+.swiftpm/
+
+# Build artifacts
+Todo.app/
+*.o
+*.dSYM/
+*.swiftmodule/
+*.swiftdoc/
+
+# Local databases (tests use throwaway paths; keep any strays out)
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Xcode (not used here — CLT-only — but ignore if anyone opens one)
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+.xcode.env
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# OS crash reports / diagnostics
+*.ips
