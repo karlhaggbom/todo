@@ -7,6 +7,10 @@ import Combine
 struct CachedJiraBoard: Codable {
     let statuses: [JiraStatus]
     let issues: [JiraIssue]
+    /// The logged-in user's account ID, cached so the "My tickets only"
+    /// filter can engage on the very first frame instead of flashing all
+    /// issues until the `myself()` call returns.
+    let myAccountID: String?
     let fetchedAt: Date
 }
 
@@ -79,6 +83,12 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
            let snapshot = try? JSONDecoder().decode(CachedJiraBoard.self, from: entry.data) {
             statuses = snapshot.statuses
             issues = snapshot.issues
+            if let cached = snapshot.myAccountID {
+                // Apply the "My tickets only" filter immediately — otherwise
+                // the board would flash every issue until the background
+                // `myself()` call returns.
+                self.myAccountID = cached
+            }
             lastUpdated = entry.fetchedAt
             showingCached = true
             cacheIsFresh = Date().timeIntervalSince(entry.fetchedAt) < 60
@@ -121,7 +131,7 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
             showingCached = false
             if let cache,
                let payload = try? JSONEncoder().encode(
-                   CachedJiraBoard(statuses: statuses, issues: issues, fetchedAt: lastUpdated!)
+                   CachedJiraBoard(statuses: statuses, issues: issues, myAccountID: myAccountID, fetchedAt: lastUpdated!)
                ) {
                 cache.storeCachedData(payload, for: cacheKey)
             }
@@ -314,15 +324,23 @@ final class MentionsModel: ObservableObject {
     let client: JiraClient
     let space: JiraSpace
     let token: String
+    let cache: BoardCaching?
+
+    private var cacheKey: String { "jira-mentions-\(space.id)" }
 
     @Published private(set) var mentioned: [JiraIssue] = []
     @Published var lastError: String?
     @Published private(set) var isLoading = false
+    @Published var lastUpdated: Date?
+    /// True while the visible list comes from the cache and the network
+    /// refresh is still in flight (same semantics as the boards).
+    @Published private(set) var showingCached = false
 
-    init(account: JiraAccount, space: JiraSpace, token: String) {
+    init(account: JiraAccount, space: JiraSpace, token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.space = space
         self.token = token
+        self.cache = cache
         self.client = JiraClient(credentials: .init(
             baseURL: account.baseURL,
             email: account.email,
@@ -332,6 +350,29 @@ final class MentionsModel: ObservableObject {
 
     @MainActor
     func load() async {
+        await load(force: false)
+    }
+
+    /// The refresh button forces past the cache-freshness shortcut.
+    @MainActor
+    func load(force: Bool) async {
+        // Cache-first (same policy as boards): publish the cached snapshot
+        // immediately, then refresh in the background.
+        var cacheIsFresh = false
+        if mentioned.isEmpty, let cache,
+           let entry = cache.cachedData(for: cacheKey),
+           let snapshot = try? JSONDecoder().decode([JiraIssue].self, from: entry.data) {
+            mentioned = snapshot
+            lastUpdated = entry.fetchedAt
+            showingCached = true
+            cacheIsFresh = Date().timeIntervalSince(entry.fetchedAt) < 60
+        }
+        // Cache is under a minute old: skip the network round-trip.
+        if !force, cacheIsFresh {
+            Diag.log.info("mentions load skipped: cache < 60s old")
+            isLoading = false
+            return
+        }
         isLoading = true
         lastError = nil
         do {
@@ -343,7 +384,7 @@ final class MentionsModel: ObservableObject {
                 .replacingOccurrences(of: "\"", with: "\\\"")
             let jql = "project = \(space.projectKey) AND text ~ \"@\(name)\" ORDER BY updated DESC"
             let result = try await client.search(jql: jql, fields: ["summary", "status", "issuetype", "updated"])
-            mentioned = result.issues?.map { issue in
+            let fresh = result.issues?.map { issue in
                 JiraIssue(
                     key: issue.key,
                     fields: .init(
@@ -360,6 +401,12 @@ final class MentionsModel: ObservableObject {
                     )
                 )
             } ?? []
+            mentioned = fresh
+            lastUpdated = Date()
+            showingCached = false
+            if let cache, let data = try? JSONEncoder().encode(fresh) {
+                cache.storeCachedData(data, for: cacheKey)
+            }
         } catch {
             lastError = error.localizedDescription
         }

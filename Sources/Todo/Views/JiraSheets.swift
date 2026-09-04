@@ -11,19 +11,19 @@ struct MentionsView: View {
 
     @StateObject private var holder: MentionsModelHolder
 
-    init(account: JiraAccount, space: JiraSpace, token: String) {
+    init(account: JiraAccount, space: JiraSpace, token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.space = space
         self.token = token
         _holder = StateObject(wrappedValue: MentionsModelHolder(
-            account: account, space: space, token: token
+            account: account, space: space, token: token, cache: cache
         ))
     }
 
     final class MentionsModelHolder: ObservableObject {
         let model: MentionsModel
-        init(account: JiraAccount, space: JiraSpace, token: String) {
-            self.model = MentionsModel(account: account, space: space, token: token)
+        init(account: JiraAccount, space: JiraSpace, token: String, cache: BoardCaching?) {
+            self.model = MentionsModel(account: account, space: space, token: token, cache: cache)
         }
     }
 
@@ -55,6 +55,11 @@ private struct MentionsContent: View {
                     .foregroundStyle(.tint)
                 Text("Mentions in \(space.name)")
                     .font(.system(size: 14, weight: .semibold))
+                if let updated = model.lastUpdated {
+                    Text("\(model.showingCached ? "cached" : "updated") \(updated.formatted(date: .omitted, time: .shortened))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(model.showingCached ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                }
                 Spacer()
                 if model.isLoading {
                     ProgressView().controlSize(.small)
@@ -62,12 +67,13 @@ private struct MentionsContent: View {
                 Toggle("Show read", isOn: $showRead)
                     .toggleStyle(.checkbox)
                 Button {
-                    Task { await model.load() }
+                    Task { await model.load(force: true) }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.borderless)
+                .help("Refresh")
                 .pointingHandOnHover()
             }
             .padding(14)
@@ -84,6 +90,11 @@ private struct MentionsContent: View {
                         ? "Nothing in \(space.projectKey) mentions you."
                         : "You've read every mention — check “Show read” to see them again.")
                 )
+                // Claim the remaining space so the VStack keeps the window
+                // height and the header stays pinned to the top (otherwise
+                // the shrunk stack centers in the window and the header
+                // floats mid-screen).
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(visible) { issue in
                     Button {
@@ -96,6 +107,15 @@ private struct MentionsContent: View {
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
                     .pointingHandOnHover()
+                    .contextMenu {
+                        Button(store.readIssueKeys.contains(issue.key) ? "Mark as Unread" : "Mark as Read") {
+                            if store.readIssueKeys.contains(issue.key) {
+                                store.markIssueUnread(issue.key)
+                            } else {
+                                store.markIssueRead(issue.key)
+                            }
+                        }
+                    }
                 }
                 .listStyle(.plain)
             }

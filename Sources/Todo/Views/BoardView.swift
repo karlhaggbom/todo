@@ -309,11 +309,7 @@ struct LaneView: View {
                     .opacity(dragging ? 0.15 : 1)
                     .gesture(dragGesture(for: task))
                     .modifier(InstantTap(
-                        single: {
-                            model.selectedLane = laneIndex
-                            model.selectedItem = index
-                        },
-                        double: {
+                        tap: {
                             model.selectedLane = laneIndex
                             model.selectedItem = index
                             model.detailTarget = CursorPosition(lane: laneIndex, item: index)
@@ -664,29 +660,18 @@ extension View {
     func pointingHandOnHover() -> some View { modifier(HoverPointingHand()) }
 }
 
-/// Single-click select + double-click detail with no disambiguation delay.
+/// Single-click detail with no tap-count disambiguation delay.
 /// SwiftUI's count-1/count-2 tap pair waits for the double-click window
 /// before firing the single tap, which makes mouse selection feel laggy.
 /// State is per card, so two fast clicks on different cards never collide.
 /// Cards are the board's primary clickable items, so they also get the
 /// pointing-hand cursor here.
 struct InstantTap: ViewModifier {
-    let single: () -> Void
-    let double: () -> Void
-    @State private var lastTap: Date?
+    let tap: () -> Void
 
     func body(content: Content) -> some View {
-        content.onTapGesture {
-            let now = Date()
-            if let previous = lastTap, now.timeIntervalSince(previous) < 0.4 {
-                lastTap = nil
-                double()
-            } else {
-                lastTap = now
-                single()
-            }
-        }
-        .pointingHandOnHover()
+        content.onTapGesture(perform: tap)
+            .pointingHandOnHover()
     }
 }
 

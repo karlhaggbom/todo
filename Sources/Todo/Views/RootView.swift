@@ -442,7 +442,7 @@ public struct RootView: View {
             if let account = store.jiraAccounts.first(where: { $0.id == accountID }),
                let space = store.jiraSpaces.first(where: { $0.accountID == accountID }),
                let token = jiraTokens[accountID] {
-                MentionsView(account: account, space: space, token: token)
+                MentionsView(account: account, space: space, token: token, cache: store)
             } else {
                 ContentUnavailableView(
                     "No Space",
@@ -473,7 +473,7 @@ public struct RootView: View {
                         description: Text("Add a Repo to this account to see mentions.")
                     )
                 } else {
-                    GitHubMentionsView(account: account, repos: repos, token: token)
+                    GitHubMentionsView(account: account, repos: repos, token: token, cache: store)
                 }
             } else {
                 ContentUnavailableView("Account unavailable", systemImage: "questionmark.circle")

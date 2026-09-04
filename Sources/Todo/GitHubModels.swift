@@ -258,15 +258,23 @@ final class GitHubMentionsModel: ObservableObject {
     let client: GitHubClient
     let repos: [GitHubRepo]
     let token: String
+    let cache: BoardCaching?
+
+    private var cacheKey: String { "github-mentions-\(account.id)" }
 
     @Published private(set) var mentioned: [GitHubMentionedIssue] = []
     @Published var lastError: String?
     @Published private(set) var isLoading = false
+    @Published var lastUpdated: Date?
+    /// True while the visible list comes from the cache and the network
+    /// refresh is still in flight (same semantics as the boards).
+    @Published private(set) var showingCached = false
 
-    init(account: GitHubAccount, repos: [GitHubRepo], token: String) {
+    init(account: GitHubAccount, repos: [GitHubRepo], token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.repos = repos
         self.token = token
+        self.cache = cache
         self.client = GitHubClient(credentials: .init(
             baseURL: account.baseURL,
             token: token
@@ -275,6 +283,29 @@ final class GitHubMentionsModel: ObservableObject {
 
     @MainActor
     func load() async {
+        await load(force: false)
+    }
+
+    /// The refresh button forces past the cache-freshness shortcut.
+    @MainActor
+    func load(force: Bool) async {
+        // Cache-first (same policy as boards): publish the cached snapshot
+        // immediately, then refresh in the background.
+        var cacheIsFresh = false
+        if mentioned.isEmpty, let cache,
+           let entry = cache.cachedData(for: cacheKey),
+           let snapshot = try? JSONDecoder().decode([GitHubMentionedIssue].self, from: entry.data) {
+            mentioned = snapshot
+            lastUpdated = entry.fetchedAt
+            showingCached = true
+            cacheIsFresh = Date().timeIntervalSince(entry.fetchedAt) < 60
+        }
+        // Cache is under a minute old: skip the network round-trip.
+        if !force, cacheIsFresh {
+            Diag.log.info("github mentions load skipped: cache < 60s old")
+            isLoading = false
+            return
+        }
         isLoading = true
         lastError = nil
         do {
@@ -291,6 +322,11 @@ final class GitHubMentionsModel: ObservableObject {
                 }
             }
             mentioned = results
+            lastUpdated = Date()
+            showingCached = false
+            if let cache, let data = try? JSONEncoder().encode(results) {
+                cache.storeCachedData(data, for: cacheKey)
+            }
         } catch {
             lastError = error.localizedDescription
         }
@@ -298,7 +334,7 @@ final class GitHubMentionsModel: ObservableObject {
     }
 }
 
-struct GitHubMentionedIssue: Identifiable, Hashable {
+struct GitHubMentionedIssue: Identifiable, Hashable, Codable {
     let repo: GitHubRepo
     let issue: GitHubIssue
     var id: String { "\(repo.id)-\(issue.number)" }

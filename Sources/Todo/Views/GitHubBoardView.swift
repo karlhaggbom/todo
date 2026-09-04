@@ -79,7 +79,7 @@ private struct GitHubBoardContent: View {
         .onChange(of: appModel.filterText) { model.filterText = $0 }
     }
 
-    /// Resolve the double-clicked issue from the visible board.
+    /// Resolve the clicked issue from the visible board.
     private func issueAt(_ target: CursorPosition) -> GitHubIssue? {
         guard model.lanes.indices.contains(target.lane) else { return nil }
         let lane = model.lanes[target.lane]
@@ -228,11 +228,7 @@ private struct GitHubBoardContent: View {
             .gesture(boardDragGesture(itemID: String(issue.number), appModel: appModel, config: dragConfig(for: issue)))
             .background(cardFrameReporter(issue))
             .modifier(InstantTap(
-                single: {
-                    appModel.selectedLane = laneIndex
-                    appModel.selectedItem = issues(inLaneIndexOf: laneIndex).firstIndex(where: { $0.number == issue.number }) ?? 0
-                },
-                double: {
+                tap: {
                     appModel.selectedLane = laneIndex
                     appModel.selectedItem = issues(inLaneIndexOf: laneIndex).firstIndex(where: { $0.number == issue.number }) ?? 0
                     appModel.detailTarget = CursorPosition(lane: laneIndex, item: appModel.selectedItem)

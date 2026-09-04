@@ -159,6 +159,20 @@ public final class TodoStore: ObservableObject {
         }
     }
 
+    /// Mark an issue as unread again (it reappears in the mentions list).
+    /// Idempotent; writes through to SQLite immediately.
+    func markIssueUnread(_ key: String) {
+        guard readIssueKeys.contains(key) else { return }
+        readIssueKeys.remove(key)
+        do {
+            try db.run("DELETE FROM read_issues WHERE key = ?") { st in
+                st.bind(1, key)
+            }
+        } catch {
+            Diag.log.error("mark-unread failed for \(key, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     private static func lane(from st: SQLiteDatabase.Statement) -> Lane {
         Lane(id: st.int("id"), name: st.string("name"), position: st.double("position"))
     }

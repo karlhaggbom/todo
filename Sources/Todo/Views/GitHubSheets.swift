@@ -11,19 +11,19 @@ struct GitHubMentionsView: View {
 
     @StateObject private var holder: GitHubMentionsModelHolder
 
-    init(account: GitHubAccount, repos: [GitHubRepo], token: String) {
+    init(account: GitHubAccount, repos: [GitHubRepo], token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.repos = repos
         self.token = token
         _holder = StateObject(wrappedValue: GitHubMentionsModelHolder(
-            account: account, repos: repos, token: token
+            account: account, repos: repos, token: token, cache: cache
         ))
     }
 
     final class GitHubMentionsModelHolder: ObservableObject {
         let model: GitHubMentionsModel
-        init(account: GitHubAccount, repos: [GitHubRepo], token: String) {
-            self.model = GitHubMentionsModel(account: account, repos: repos, token: token)
+        init(account: GitHubAccount, repos: [GitHubRepo], token: String, cache: BoardCaching?) {
+            self.model = GitHubMentionsModel(account: account, repos: repos, token: token, cache: cache)
         }
     }
 
@@ -54,6 +54,11 @@ private struct GitHubMentionsContent: View {
                     .foregroundStyle(.tint)
                 Text("Mentions @\(model.account.login)")
                     .font(.system(size: 14, weight: .semibold))
+                if let updated = model.lastUpdated {
+                    Text("\(model.showingCached ? "cached" : "updated") \(updated.formatted(date: .omitted, time: .shortened))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(model.showingCached ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                }
                 Spacer()
                 if model.isLoading {
                     ProgressView().controlSize(.small)
@@ -61,12 +66,13 @@ private struct GitHubMentionsContent: View {
                 Toggle("Show read", isOn: $showRead)
                     .toggleStyle(.checkbox)
                 Button {
-                    Task { await model.load() }
+                    Task { await model.load(force: true) }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.borderless)
+                .help("Refresh")
                 .pointingHandOnHover()
             }
             .padding(14)
@@ -83,6 +89,11 @@ private struct GitHubMentionsContent: View {
                         ? "Nothing mentions @\(model.account.login)."
                         : "You've read every mention — check “Show read” to see them again.")
                 )
+                // Claim the remaining space so the VStack keeps the window
+                // height and the header stays pinned to the top (otherwise
+                // the shrunk stack centers in the window and the header
+                // floats mid-screen).
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(visible) { item in
                     Button {
@@ -97,6 +108,15 @@ private struct GitHubMentionsContent: View {
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
                     .pointingHandOnHover()
+                    .contextMenu {
+                        Button(store.readIssueKeys.contains(item.readKey) ? "Mark as Unread" : "Mark as Read") {
+                            if store.readIssueKeys.contains(item.readKey) {
+                                store.markIssueUnread(item.readKey)
+                            } else {
+                                store.markIssueRead(item.readKey)
+                            }
+                        }
+                    }
                 }
                 .listStyle(.plain)
             }

@@ -477,6 +477,59 @@ import Foundation
         #expect(store.cachedData(for: "github-board-1")?.data == Data("x".utf8))
     }
 
+    /// The board cache gained a myAccountID field: new snapshots round-trip
+    /// it, and old snapshots (written before the field existed) must still
+    /// decode with it as nil.
+    @Test func boardCacheAccountIDRoundTripsAndOldSnapshotsDecode() throws {
+        let snapshot = CachedJiraBoard(
+            statuses: [JiraStatus(name: "To Do", categoryKey: "new")],
+            issues: [],
+            myAccountID: "5f3a:abc",
+            fetchedAt: Date()
+        )
+        let data = try JSONEncoder().encode(snapshot)
+        let back = try JSONDecoder().decode(CachedJiraBoard.self, from: data)
+        #expect(back.myAccountID == "5f3a:abc")
+
+        // Old format: no myAccountID key at all. Synthesized Codable uses
+        // decodeIfPresent for optionals, so this must decode, not throw.
+        let old = Data(#"{"statuses":[],"issues":[],"fetchedAt":700000000}"#.utf8)
+        let legacy = try JSONDecoder().decode(CachedJiraBoard.self, from: old)
+        #expect(legacy.myAccountID == nil)
+    }
+
+    /// Mentions snapshots must survive the JSON encode/decode the cache does;
+    /// the GitHub entry embeds a repo, so it exercises the nested Codable path.
+    @Test func mentionsCacheSnapshotsRoundTrip() throws {
+        let jiraSnapshot: [JiraIssue] = [
+            JiraIssue(key: "TAP-1", fields: .init(
+                summary: "You were mentioned",
+                description: nil,
+                status: .init(name: "In Progress", statusCategory: .init(key: "indeterminate")),
+                issuetype: .init(name: "Task", iconURL: nil),
+                assignee: nil,
+                priority: nil,
+                updated: "2026-09-04T08:00:00.000+0000"
+            ))
+        ]
+        let jiraData = try JSONEncoder().encode(jiraSnapshot)
+        let jiraBack = try JSONDecoder().decode([JiraIssue].self, from: jiraData)
+        #expect(jiraBack == jiraSnapshot)
+
+        let repo = GitHubRepo(id: 7, accountID: 3, name: "ais", owner: "some-org", repo: "ais")
+        let ghSnapshot: [GitHubMentionedIssue] = [
+            GitHubMentionedIssue(repo: repo, issue: GitHubIssue(
+                number: 42, title: "Mentioned here", body: nil, state: "open",
+                stateReason: nil, htmlURL: "https://example.com/42", updatedAt: "2026-09-04T08:00:00Z",
+                labels: [], assignees: [], pullRequest: nil
+            ))
+        ]
+        let ghData = try JSONEncoder().encode(ghSnapshot)
+        let ghBack = try JSONDecoder().decode([GitHubMentionedIssue].self, from: ghData)
+        #expect(ghBack == ghSnapshot)
+        #expect(ghBack.first?.readKey == "some-org/ais#42")
+    }
+
     @Test func readIssuesPersistAcrossStoreReloads() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("todo-read-\(UUID().uuidString).sqlite3")
@@ -494,6 +547,15 @@ import Foundation
         // is durable, not just in-memory.
         let reopened = try TodoStore(databasePath: url.path)
         #expect(reopened.readIssueKeys == ["TAP-123", "some-org/some-repo#42"])
+
+        // Marking unread removes the key, persists, and is idempotent
+        // (the guard must not resurrect it).
+        reopened.markIssueUnread("TAP-123")
+        reopened.markIssueUnread("TAP-123")
+        reopened.markIssueUnread("never-was-read")
+        #expect(reopened.readIssueKeys == ["some-org/some-repo#42"])
+        let reopenedAgain = try TodoStore(databasePath: url.path)
+        #expect(reopenedAgain.readIssueKeys == ["some-org/some-repo#42"])
 
         try? FileManager.default.removeItem(at: url)
     }

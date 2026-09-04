@@ -84,7 +84,7 @@ private struct JiraBoardContent: View {
         .onChange(of: appModel.filterText) { model.filterText = $0 }
     }
 
-    /// Resolve the double-clicked issue from the visible board.
+    /// Resolve the clicked issue from the visible board.
     private func issueAt(_ target: CursorPosition) -> JiraIssue? {
         guard model.statuses.indices.contains(target.lane) else { return nil }
         let status = model.statuses[target.lane]
@@ -250,11 +250,7 @@ private struct JiraBoardContent: View {
             .gesture(boardDragGesture(itemID: issue.key, appModel: appModel, config: dragConfig(for: issue)))
             .background(cardFrameReporter(issue))
             .modifier(InstantTap(
-                single: {
-                    appModel.selectedLane = laneIndex
-                    appModel.selectedItem = issues(inStatusIndexOf: laneIndex).firstIndex(where: { $0.key == issue.key }) ?? 0
-                },
-                double: {
+                tap: {
                     appModel.selectedLane = laneIndex
                     appModel.selectedItem = issues(inStatusIndexOf: laneIndex).firstIndex(where: { $0.key == issue.key }) ?? 0
                     appModel.detailTarget = CursorPosition(lane: laneIndex, item: appModel.selectedItem)
