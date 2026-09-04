@@ -385,6 +385,20 @@ final class ActivityModel: ObservableObject {
         lastError = nil
         do {
             let me = try await client.myself()
+            // Full refreshes run at launch (no lastFull recorded), hourly
+            // after that, and whenever the user forces one. Everything in
+            // between is a DELTA: only issues updated in the last 15
+            // minutes are searched and re-analyzed. The relative JQL form
+            // is evaluated against Jira's clock, so there is no timezone
+            // or clock-skew risk — and a poll every ~5 minutes re-doing up
+            // to 15 minutes of updates is harmless. A delta cannot detect
+            // removals (unassigned from me, mention edited away); the
+            // hourly full refresh reaps those.
+            let lastFull = AppPreferences.activityLastFull(scope: cacheKey)
+            let needsFull = force
+                || lastFull == nil
+                || Date().timeIntervalSince(lastFull!) > 3600
+            let deltaFilter = needsFull ? "" : " AND updated >= \"-15m\""
             // Two searches in parallel: mentions, and everything assigned
             // to me (ownership proxy for "changes/comments on my tickets").
             // Escape quotes/backslashes for the phrase search so display
@@ -393,41 +407,75 @@ final class ActivityModel: ObservableObject {
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
             async let mentionsTask = client.search(
-                jql: "project = \(space.projectKey) AND text ~ \"@\(name)\" ORDER BY updated DESC",
+                jql: "project = \(space.projectKey) AND text ~ \"@\(name)\"" + deltaFilter + " ORDER BY updated DESC",
                 fields: ["summary", "status", "issuetype", "updated"]
             )
             async let assignedTask = client.search(
-                jql: "project = \(space.projectKey) AND assignee = currentUser() ORDER BY updated DESC",
+                jql: "project = \(space.projectKey) AND assignee = currentUser()" + deltaFilter + " ORDER BY updated DESC",
                 fields: ["summary", "status", "issuetype", "assignee", "priority", "updated"]
             )
             let (mentions, assigned) = try await (mentionsTask, assignedTask)
 
-            var byKey: [String: JiraActivityEntry] = [:]
+            var updates: [JiraActivityEntry] = []
             for issue in mentions.issues ?? [] {
                 let mapped = Self.map(issue, withAssignee: false)
-                byKey[mapped.key] = JiraActivityEntry(
+                updates.append(JiraActivityEntry(
                     reason: .mention, issue: mapped,
                     activityAt: mapped.fields.updated ?? "", actor: nil
-                )
+                ))
             }
-            for issue in assigned.issues ?? [] {
-                let mapped = Self.map(issue, withAssignee: true)
-                if let entry = await assignedEntry(mapped, me: me) {
-                    byKey[mapped.key] = byKey[mapped.key].map { JiraActivityEntry.newest($0, entry) } ?? entry
+            // Analyze assigned issues in parallel — a bounded pool (6 at a
+            // time) stays polite to the API while cutting the tick's
+            // wall-clock time several-fold versus one-at-a-time fetches.
+            let mappedAssigned = (assigned.issues ?? []).map { Self.map($0, withAssignee: true) }
+            let analyzed: [JiraActivityEntry] = await withTaskGroup(of: JiraActivityEntry?.self) { group in
+                var nextIndex = 0
+                let limit = 6
+                func startNext() {
+                    guard nextIndex < mappedAssigned.count else { return }
+                    let issue = mappedAssigned[nextIndex]
+                    nextIndex += 1
+                    group.addTask { await self.assignedEntry(issue, me: me) }
                 }
+                for _ in 0..<min(limit, mappedAssigned.count) { startNext() }
+                var collected: [JiraActivityEntry] = []
+                while let result = await group.next() {
+                    if let result { collected.append(result) }
+                    startNext()
+                }
+                return collected
             }
-            let fresh = Self.sorted(Array(byKey.values))
+            updates.append(contentsOf: analyzed)
+            // Delta merge: keep every already-known entry; only issues the
+            // search returned get recomputed. (A full refresh starts from
+            // an empty base, which gives the old "replace" behavior.)
+            let fresh = Self.mergedActivity(existing: needsFull ? [] : activity, updates: updates)
             activity = fresh
             lastUpdated = Date()
             showingCached = false
             if let cache, let data = try? JSONEncoder().encode(fresh) {
                 cache.storeCachedData(data, for: cacheKey)
             }
-            Diag.log.info("activity loaded entries=\(fresh.count, privacy: .public)")
+            if needsFull { AppPreferences.setActivityLastFull(Date(), scope: cacheKey) }
+            Diag.log.info("activity loaded entries=\(fresh.count, privacy: .public) delta=\(!needsFull, privacy: .public)")
         } catch {
             lastError = error.localizedDescription
         }
         isLoading = false
+    }
+
+    /// Merge freshly-computed entries into the known set: one entry per
+    /// issue, newest reason wins, and entries the delta didn't return
+    /// stay put (they were untouched). Pure — unit-tested.
+    static func mergedActivity(
+        existing: [JiraActivityEntry], updates: [JiraActivityEntry]
+    ) -> [JiraActivityEntry] {
+        var byKey: [String: JiraActivityEntry] = [:]
+        for entry in existing { byKey[entry.id] = byKey[entry.id].map { JiraActivityEntry.newest($0, entry) } ?? entry }
+        for entry in updates {
+            byKey[entry.id] = byKey[entry.id].map { JiraActivityEntry.newest($0, entry) } ?? entry
+        }
+        return sorted(Array(byKey.values))
     }
 
     /// Analyze one issue assigned to me. Returns the most recent
@@ -436,8 +484,22 @@ final class ActivityModel: ObservableObject {
     /// activity is my own (e.g. I assigned the issue to myself): own updates
     /// must never create feed entries.
     private func assignedEntry(_ issue: JiraIssue, me: JiraUser) async -> JiraActivityEntry? {
-        let comments = (try? await client.comments(key: issue.key))?.comments ?? []
-        let changelog = (try? await client.changelog(key: issue.key)) ?? []
+        // Issues untouched for a month can't hold recent activity — skip
+        // their two per-issue API calls entirely (the entry stays, as the
+        // plain assignment).
+        if let updated = parseActivityDate(issue.fields.updated ?? ""),
+           Date().timeIntervalSince(updated) > 30 * 24 * 3600 {
+            return JiraActivityEntry(
+                reason: .assigned, issue: issue,
+                activityAt: issue.fields.updated ?? "", actor: nil
+            )
+        }
+        // Comments and changelog don't depend on each other — fetch both
+        // in parallel.
+        async let commentsTask = client.comments(key: issue.key)
+        async let changelogTask = client.changelog(key: issue.key)
+        let comments = (try? await commentsTask)?.comments ?? []
+        let changelog = (try? await changelogTask) ?? []
         let myID = me.accountID
 
         // Comments by someone else (nil accountId = synthesized/unknown →

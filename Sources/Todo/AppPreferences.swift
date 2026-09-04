@@ -26,4 +26,19 @@ enum AppPreferences {
     static func setShowRead(_ value: Bool, scope: String) {
         defaults.set(value, forKey: "showRead-\(scope)")
     }
+
+    // MARK: Activity full-refresh bookkeeping (per scope)
+    //
+    // Delta refreshes (issues updated in the last 15 minutes) are cheap
+    // but can't detect removals — a full refresh runs at launch, hourly,
+    // and on force-refresh to reap anything that dropped off.
+
+    static func activityLastFull(scope: String) -> Date? {
+        let raw = defaults.double(forKey: "activity-lastfull-\(scope)")
+        return raw > 0 ? Date(timeIntervalSince1970: raw) : nil
+    }
+
+    static func setActivityLastFull(_ date: Date, scope: String) {
+        defaults.set(date.timeIntervalSince1970, forKey: "activity-lastfull-\(scope)")
+    }
 }

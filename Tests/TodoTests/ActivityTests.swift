@@ -121,3 +121,50 @@ private func ghIssue(number: Int, updatedAt: String) -> GitHubIssue {
         labels: [], assignees: [], pullRequest: nil
     )
 }
+
+// MARK: Delta merge (Jira activity)
+
+private func jiraDeltaEntry(key: String, at: String, reason: ActivityReason) -> JiraActivityEntry {
+    JiraActivityEntry(
+        reason: reason,
+        issue: JiraIssue(key: key, fields: .init(
+            summary: "s", description: nil,
+            status: .init(name: "To Do", statusCategory: .init(key: "new")),
+            issuetype: .init(name: "Task", iconURL: nil),
+            assignee: nil, priority: nil,
+            updated: at
+        )),
+        activityAt: at, actor: nil
+    )
+}
+
+@Test func deltaMergeKeepsUntouchedEntriesAndReplacesUpdatedOnes() {
+    let existing = [
+        jiraDeltaEntry(key: "TAP-1", at: "2026-09-04T12:00:00.000+0000", reason: .comment),
+        jiraDeltaEntry(key: "TAP-2", at: "2026-09-04T11:00:00.000+0000", reason: .assigned),
+    ]
+    // TAP-1 got a fresher change; TAP-3 is new; TAP-2 was untouched.
+    let updates = [
+        jiraDeltaEntry(key: "TAP-1", at: "2026-09-04T12:30:00.000+0000", reason: .change),
+        jiraDeltaEntry(key: "TAP-3", at: "2026-09-04T12:45:00.000+0000", reason: .mention),
+    ]
+    let merged = ActivityModel.mergedActivity(existing: existing, updates: updates)
+    #expect(merged.count == 3)
+    let byKey = Dictionary(uniqueKeysWithValues: merged.map { ($0.id, $0) })
+    #expect(byKey["TAP-1"]?.reason == .change) // updated wins
+    #expect(byKey["TAP-2"]?.reason == .assigned) // untouched stays
+    #expect(byKey["TAP-3"]?.reason == .mention) // new appears
+    // Sorted newest-first.
+    #expect(merged.map(\.id) == ["TAP-3", "TAP-1", "TAP-2"])
+}
+
+@Test func deltaMergeDoesNotLetStaleUpdateDegradeANewerReason() {
+    // The delta returned TAP-1 again (it was updated), but the fresh
+    // mention entry's timestamp is OLDER than the comment we already
+    // know about — the newest reason must survive.
+    let existing = [jiraDeltaEntry(key: "TAP-1", at: "2026-09-04T12:00:00.000+0000", reason: .comment)]
+    let updates = [jiraDeltaEntry(key: "TAP-1", at: "2026-09-04T11:00:00.000+0000", reason: .mention)]
+    let merged = ActivityModel.mergedActivity(existing: existing, updates: updates)
+    #expect(merged.count == 1)
+    #expect(merged[0].reason == .comment)
+}

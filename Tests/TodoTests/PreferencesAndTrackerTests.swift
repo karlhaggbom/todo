@@ -69,3 +69,14 @@ import Foundation
         #expect(tracker.githubActivityKeys.isEmpty)
     }
 }
+
+@Test func activityLastFullPersistsPerScope() {
+    let a = "test-lastfull-\(UUID().uuidString)"
+    let b = "test-lastfull-\(UUID().uuidString)"
+    let early = Date(timeIntervalSince1970: 1_000_000_000)
+    AppPreferences.setActivityLastFull(early, scope: a)
+    // A different scope is untouched; the stored date round-trips.
+    #expect(AppPreferences.activityLastFull(scope: b) == nil)
+    #expect(abs(AppPreferences.activityLastFull(scope: a)!.timeIntervalSince(early)) < 0.001)
+    UserDefaults.standard.removeObject(forKey: "activity-lastfull-\(a)")
+}
