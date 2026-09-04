@@ -254,6 +254,43 @@ final class JiraClient {
         return try await send(req, as: JiraCommentPage.self)
     }
 
+    // MARK: API: issue changelog (field-change history)
+
+    struct JiraChangelogPage: Decodable {
+        struct Entry: Decodable, Hashable {
+            struct Author: Decodable, Hashable {
+                let accountId: String?
+                let displayName: String?
+            }
+            struct Item: Decodable, Hashable {
+                let field: String
+                let fieldtype: String?
+                let from: String?
+                let fromString: String?
+                let to: String?
+                let toString: String?
+            }
+            let id: String
+            let created: String
+            let author: Author?
+            let items: [Item]?
+        }
+        let startAt: Int?
+        let maxResults: Int?
+        let total: Int?
+        let values: [Entry]?
+    }
+
+    /// Field-change history for one issue (first page, 100 entries — more
+    /// than enough for activity detection; ancient changes don't matter).
+    func changelog(key: String) async throws -> [JiraChangelogPage.Entry] {
+        let page: JiraChangelogPage = try await send(
+            try request("GET", "/rest/api/3/issue/\(key)/changelog?maxResults=100"),
+            as: JiraChangelogPage.self
+        )
+        return page.values ?? []
+    }
+
     struct CommentPayload: Encodable {
         let body: ADFDocument
     }

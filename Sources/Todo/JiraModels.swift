@@ -324,16 +324,19 @@ extension Array {
 // MARK: - Mentions model
 
 /// Shows issues mentioning the signed-in user for one account.
-final class MentionsModel: ObservableObject {
+final class ActivityModel: ObservableObject {
     let account: JiraAccount
     let client: JiraClient
     let space: JiraSpace
     let token: String
     let cache: BoardCaching?
 
-    private var cacheKey: String { "jira-mentions-\(space.id)" }
+    private var cacheKey: String { "jira-activity-\(space.id)" }
 
-    @Published private(set) var mentioned: [JiraIssue] = []
+    /// The activity feed, newest first. One entry per issue; each carries
+    /// the single most recent reason it impacts the user: a mention, an
+    /// assignment, someone else's comment, or someone else's change.
+    @Published private(set) var activity: [JiraActivityEntry] = []
     @Published var lastError: String?
     @Published private(set) var isLoading = false
     @Published var lastUpdated: Date?
@@ -364,17 +367,17 @@ final class MentionsModel: ObservableObject {
         // Cache-first (same policy as boards): publish the cached snapshot
         // immediately, then refresh in the background.
         var cacheIsFresh = false
-        if mentioned.isEmpty, let cache,
+        if activity.isEmpty, let cache,
            let entry = cache.cachedData(for: cacheKey),
-           let snapshot = try? JSONDecoder().decode([JiraIssue].self, from: entry.data) {
-            mentioned = snapshot
+           let snapshot = try? JSONDecoder().decode([JiraActivityEntry].self, from: entry.data) {
+            activity = Self.sorted(snapshot)
             lastUpdated = entry.fetchedAt
             showingCached = true
             cacheIsFresh = Date().timeIntervalSince(entry.fetchedAt) < 60
         }
         // Cache is under a minute old: skip the network round-trip.
         if !force, cacheIsFresh {
-            Diag.log.info("mentions load skipped: cache < 60s old")
+            Diag.log.info("activity load skipped: cache < 60s old")
             isLoading = false
             return
         }
@@ -382,39 +385,135 @@ final class MentionsModel: ObservableObject {
         lastError = nil
         do {
             let me = try await client.myself()
+            // Two searches in parallel: mentions, and everything assigned
+            // to me (ownership proxy for "changes/comments on my tickets").
             // Escape quotes/backslashes for the phrase search so display
             // names with specials don't break the JQL.
             let name = me.displayName
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
-            let jql = "project = \(space.projectKey) AND text ~ \"@\(name)\" ORDER BY updated DESC"
-            let result = try await client.search(jql: jql, fields: ["summary", "status", "issuetype", "updated"])
-            let fresh = result.issues?.map { issue in
-                JiraIssue(
-                    key: issue.key,
-                    fields: .init(
-                        summary: issue.fields.summary ?? "",
-                        description: nil,
-                        status: .init(
-                            name: issue.fields.status.name,
-                            statusCategory: .init(key: issue.fields.status.statusCategory.key)
-                        ),
-                        issuetype: .init(name: issue.fields.issuetype.name, iconURL: issue.fields.issuetype.iconURL),
-                        assignee: nil,
-                        priority: nil,
-                        updated: issue.fields.updated
-                    )
+            async let mentionsTask = client.search(
+                jql: "project = \(space.projectKey) AND text ~ \"@\(name)\" ORDER BY updated DESC",
+                fields: ["summary", "status", "issuetype", "updated"]
+            )
+            async let assignedTask = client.search(
+                jql: "project = \(space.projectKey) AND assignee = currentUser() ORDER BY updated DESC",
+                fields: ["summary", "status", "issuetype", "assignee", "priority", "updated"]
+            )
+            let (mentions, assigned) = try await (mentionsTask, assignedTask)
+
+            var byKey: [String: JiraActivityEntry] = [:]
+            for issue in mentions.issues ?? [] {
+                let mapped = Self.map(issue, withAssignee: false)
+                byKey[mapped.key] = JiraActivityEntry(
+                    reason: .mention, issue: mapped,
+                    activityAt: mapped.fields.updated ?? "", actor: nil
                 )
-            } ?? []
-            mentioned = fresh
+            }
+            for issue in assigned.issues ?? [] {
+                let mapped = Self.map(issue, withAssignee: true)
+                if let entry = await assignedEntry(mapped, me: me) {
+                    byKey[mapped.key] = byKey[mapped.key].map { JiraActivityEntry.newest($0, entry) } ?? entry
+                }
+            }
+            let fresh = Self.sorted(Array(byKey.values))
+            activity = fresh
             lastUpdated = Date()
             showingCached = false
             if let cache, let data = try? JSONEncoder().encode(fresh) {
                 cache.storeCachedData(data, for: cacheKey)
             }
+            Diag.log.info("activity loaded entries=\(fresh.count, privacy: .public)")
         } catch {
             lastError = error.localizedDescription
         }
         isLoading = false
+    }
+
+    /// Analyze one issue assigned to me. Returns the most recent
+    /// "someone else" activity: their comment, their change, or — with no
+    /// other activity — the assignment itself. Returns nil when the only
+    /// activity is my own (e.g. I assigned the issue to myself): own updates
+    /// must never create feed entries.
+    private func assignedEntry(_ issue: JiraIssue, me: JiraUser) async -> JiraActivityEntry? {
+        let comments = (try? await client.comments(key: issue.key))?.comments ?? []
+        let changelog = (try? await client.changelog(key: issue.key)) ?? []
+        let myID = me.accountID
+
+        // Comments by someone else (nil accountId = synthesized/unknown →
+        // not attributable, doesn't count as activity).
+        let otherComments = comments.filter { c in
+            guard let id = c.author?.accountId else { return false }
+            return id != myID
+        }
+        if let latest = Self.latest(otherComments, by: { $0.created }) {
+            return JiraActivityEntry(
+                reason: .comment, issue: issue,
+                activityAt: latest.created, actor: latest.author?.displayName
+            )
+        }
+        // Field changes by someone else (status, priority, sprint, ...).
+        let otherChanges = changelog.filter { e in
+            guard let id = e.author?.accountId else { return false }
+            return id != myID
+        }
+        if let latest = Self.latest(otherChanges, by: { $0.created }) {
+            return JiraActivityEntry(
+                reason: .change, issue: issue,
+                activityAt: latest.created, actor: latest.author?.displayName
+            )
+        }
+        // Nothing by anyone else: the assignment itself is the activity —
+        // unless the last assignee-change-to-me was authored by me.
+        let assignToMe = changelog.filter { e in
+            e.items?.contains {
+                $0.field == "assignee" && ($0.to == myID || $0.toString == me.displayName)
+            } == true
+        }
+        if let last = Self.latest(assignToMe, by: { $0.created }),
+           last.author?.accountId == myID {
+            return nil // self-assigned: my own action, not activity
+        }
+        return JiraActivityEntry(
+            reason: .assigned, issue: issue,
+            activityAt: issue.fields.updated ?? "",
+            actor: Self.latest(assignToMe, by: { $0.created })?.author?.displayName
+        )
+    }
+
+    /// Map a raw search result into the app's issue shape. The mentions
+    /// search doesn't request assignee/priority, so those stay nil there.
+    private static func map(_ issue: JiraClient.SearchResponse.ResultIssue, withAssignee: Bool) -> JiraIssue {
+        JiraIssue(
+            key: issue.key,
+            fields: .init(
+                summary: issue.fields.summary ?? "",
+                description: nil,
+                status: .init(
+                    name: issue.fields.status.name,
+                    statusCategory: .init(key: issue.fields.status.statusCategory.key)
+                ),
+                issuetype: .init(name: issue.fields.issuetype.name, iconURL: issue.fields.issuetype.iconURL),
+                assignee: withAssignee
+                    ? issue.fields.assignee.map { .init(displayName: $0.displayName, accountID: $0.accountID) }
+                    : nil,
+                priority: withAssignee
+                    ? issue.fields.priority.map { .init(name: $0.name) }
+                    : nil,
+                updated: issue.fields.updated
+            )
+        )
+    }
+
+    private static func latest<T>(_ items: [T], by timestamp: (T) -> String) -> T? {
+        items.max { a, b in
+            (parseActivityDate(timestamp(a)) ?? .distantPast) < (parseActivityDate(timestamp(b)) ?? .distantPast)
+        }
+    }
+
+    private static func sorted(_ entries: [JiraActivityEntry]) -> [JiraActivityEntry] {
+        entries.sorted { a, b in
+            (parseActivityDate(a.activityAt) ?? .distantPast) > (parseActivityDate(b.activityAt) ?? .distantPast)
+        }
     }
 }

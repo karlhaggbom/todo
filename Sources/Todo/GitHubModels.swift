@@ -253,16 +253,19 @@ final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
 // MARK: - GitHub mentions model
 
 /// Issues mentioning the signed-in user across an account's repos.
-final class GitHubMentionsModel: ObservableObject {
+final class GitHubActivityModel: ObservableObject {
     let account: GitHubAccount
     let client: GitHubClient
     let repos: [GitHubRepo]
     let token: String
     let cache: BoardCaching?
 
-    private var cacheKey: String { "github-mentions-\(account.id)" }
+    private var cacheKey: String { "github-activity-\(account.id)" }
 
-    @Published private(set) var mentioned: [GitHubMentionedIssue] = []
+    /// The activity feed, newest first: mentions, issues/PRs assigned to
+    /// the user, PRs awaiting their review, and others' comments/changes on
+    /// their issues. One entry per issue, with the most recent reason.
+    @Published private(set) var activity: [GitHubActivityEntry] = []
     @Published var lastError: String?
     @Published private(set) var isLoading = false
     @Published var lastUpdated: Date?
@@ -292,53 +295,126 @@ final class GitHubMentionsModel: ObservableObject {
         // Cache-first (same policy as boards): publish the cached snapshot
         // immediately, then refresh in the background.
         var cacheIsFresh = false
-        if mentioned.isEmpty, let cache,
+        if activity.isEmpty, let cache,
            let entry = cache.cachedData(for: cacheKey),
-           let snapshot = try? JSONDecoder().decode([GitHubMentionedIssue].self, from: entry.data) {
-            mentioned = snapshot
+           let snapshot = try? JSONDecoder().decode([GitHubActivityEntry].self, from: entry.data) {
+            activity = Self.sorted(snapshot)
             lastUpdated = entry.fetchedAt
             showingCached = true
             cacheIsFresh = Date().timeIntervalSince(entry.fetchedAt) < 60
         }
         // Cache is under a minute old: skip the network round-trip.
         if !force, cacheIsFresh {
-            Diag.log.info("github mentions load skipped: cache < 60s old")
+            Diag.log.info("github activity load skipped: cache < 60s old")
             isLoading = false
             return
         }
         isLoading = true
         lastError = nil
         do {
-            var seen = Set<String>()
-            var results: [GitHubMentionedIssue] = []
+            var byId: [String: GitHubActivityEntry] = [:]
             for repo in repos {
-                let hits = try await client.issuesMentioning(
+                // Three searches in parallel: mentions, assignments
+                // (issues + PRs), and PRs awaiting my review.
+                async let mentionsTask = client.issuesMentioning(
                     owner: repo.owner, repo: repo.repo, login: account.login
                 )
-                for issue in hits {
-                    let key = "\(repo.owner)/\(repo.repo)#\(issue.number)"
-                    guard seen.insert(key).inserted else { continue }
-                    results.append(GitHubMentionedIssue(repo: repo, issue: issue))
+                async let assignedTask = client.issuesAssigned(
+                    owner: repo.owner, repo: repo.repo, login: account.login
+                )
+                async let reviewTask = client.prsReviewRequested(
+                    owner: repo.owner, repo: repo.repo, login: account.login
+                )
+                let (mentions, assigned, reviews) = try await (mentionsTask, assignedTask, reviewTask)
+                for issue in mentions {
+                    byId["\(repo.id)-\(issue.number)"] = GitHubActivityEntry(
+                        reason: .mention, repo: repo, issue: issue,
+                        activityAt: issue.updatedAt ?? "", actor: nil
+                    )
+                }
+                for pr in reviews {
+                    let entry = GitHubActivityEntry(
+                        reason: .reviewRequested, repo: repo, issue: pr,
+                        activityAt: pr.updatedAt ?? "", actor: nil
+                    )
+                    byId[entry.id] = byId[entry.id].map { GitHubActivityEntry.newest($0, entry) } ?? entry
+                }
+                for issue in assigned {
+                    if let entry = await assignedEntry(issue, in: repo) {
+                        byId[entry.id] = byId[entry.id].map { GitHubActivityEntry.newest($0, entry) } ?? entry
+                    }
                 }
             }
-            mentioned = results
+            let fresh = Self.sorted(Array(byId.values))
+            activity = fresh
             lastUpdated = Date()
             showingCached = false
-            if let cache, let data = try? JSONEncoder().encode(results) {
+            if let cache, let data = try? JSONEncoder().encode(fresh) {
                 cache.storeCachedData(data, for: cacheKey)
             }
+            Diag.log.info("github activity loaded entries=\(fresh.count, privacy: .public)")
         } catch {
             lastError = error.localizedDescription
         }
         isLoading = false
     }
-}
 
-struct GitHubMentionedIssue: Identifiable, Hashable, Codable {
-    let repo: GitHubRepo
-    let issue: GitHubIssue
-    var id: String { "\(repo.id)-\(issue.number)" }
-    /// Stable read-tracking key (survives deleting and re-adding the repo,
-    /// unlike the id which uses the row id).
-    var readKey: String { "\(repo.owner)/\(repo.repo)#\(issue.number)" }
+    /// Analyze one issue/PR assigned to me: someone else's comment, their
+    /// change, or — with no other activity — the assignment itself.
+    /// Returns nil when the only activity is my own (self-assignment,
+    /// my own edits): own updates must never create feed entries.
+    private func assignedEntry(_ issue: GitHubIssue, in repo: GitHubRepo) async -> GitHubActivityEntry? {
+        let comments = (try? await client.comments(owner: repo.owner, repo: repo.repo, number: issue.number)) ?? []
+        let events = (try? await client.issueEvents(owner: repo.owner, repo: repo.repo, number: issue.number)) ?? []
+        let myLogin = account.login.lowercased()
+        func isMe(_ login: String?) -> Bool { login?.lowercased() == myLogin }
+
+        // Comments by someone else.
+        let otherComments = comments.filter { !isMe($0.user.login) }
+        if let latest = Self.latest(otherComments, by: { $0.createdAt }) {
+            return GitHubActivityEntry(
+                reason: .comment, repo: repo, issue: issue,
+                activityAt: latest.createdAt, actor: latest.user.login
+            )
+        }
+        // Meaningful changes by someone else (bots excluded to keep CI
+        // sync noise out of the feed).
+        let otherChanges = events.filter { e in
+            guard Self.changeEvents.contains(e.event),
+                  let actor = e.actor?.login,
+                  !isMe(actor) else { return false }
+            return !actor.hasSuffix("[bot]") && actor != "github-actions"
+        }
+        if let latest = Self.latest(otherChanges, by: { $0.createdAt }) {
+            return GitHubActivityEntry(
+                reason: .change, repo: repo, issue: issue,
+                activityAt: latest.createdAt, actor: latest.actor?.login
+            )
+        }
+        // Nothing by anyone else: the assignment itself is the activity —
+        // unless the last assigned-to-me event was performed by me.
+        let assignedToMe = events.filter { $0.event == "assigned" && $0.assignee?.login.lowercased() == myLogin }
+        if let last = Self.latest(assignedToMe, by: { $0.createdAt }), isMe(last.actor?.login) {
+            return nil // self-assigned: my own action, not activity
+        }
+        return GitHubActivityEntry(
+            reason: .assigned, repo: repo, issue: issue,
+            activityAt: issue.updatedAt ?? "",
+            actor: Self.latest(assignedToMe, by: { $0.createdAt })?.actor?.login
+        )
+    }
+
+    private static let changeEvents = GitHubClient.GitHubIssueEvent.changeEvents
+
+    private static func latest<T>(_ items: [T], by timestamp: (T) -> String) -> T? {
+        items.max { a, b in
+            (parseActivityDate(timestamp(a)) ?? .distantPast) < (parseActivityDate(timestamp(b)) ?? .distantPast)
+        }
+    }
+
+    private static func sorted(_ entries: [GitHubActivityEntry]) -> [GitHubActivityEntry] {
+        entries.sorted { a, b in
+            (parseActivityDate(a.activityAt) ?? .distantPast) > (parseActivityDate(b.activityAt) ?? .distantPast)
+        }
+    }
 }

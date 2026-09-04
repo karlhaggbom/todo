@@ -384,6 +384,17 @@ struct GitHubCardView: View {
                 Text("#\(issue.number)")
                     .font(.system(size: 10, weight: .semibold).monospaced())
                     .foregroundStyle(.tertiary)
+                // Pull requests only reach the cards via the activity feed
+                // (boards are issue-only) — mark them so a "comment on PR
+                // vs issue" is visible at a glance.
+                if issue.pullRequest != nil {
+                    Text("PR")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.purple)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.purple.opacity(0.12)))
+                        .help("Pull request")
+                }
                 if let repoName {
                     Text(repoName)
                         .font(.system(size: 10, weight: .medium))

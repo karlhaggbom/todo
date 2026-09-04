@@ -185,11 +185,61 @@ final class GitHubClient {
     }
 
     /// Issues in a repo that mention the given login (search API).
+    /// Issues (not PRs) mentioning the user.
     func issuesMentioning(owner: String, repo: String, login: String) async throws -> [GitHubIssue] {
-        let q = "repo:\(owner)/\(repo)+is:issue+mentions:\(login)"
+        try await issueSearch("repo:\(owner)/\(repo)+is:issue+mentions:\(login)")
+            .filter { $0.pullRequest == nil }
+    }
+
+    /// Issues AND pull requests assigned to the user.
+    func issuesAssigned(owner: String, repo: String, login: String) async throws -> [GitHubIssue] {
+        try await issueSearch("repo:\(owner)/\(repo)+assignee:\(login)")
+    }
+
+    /// Open PRs where the user's review is requested.
+    func prsReviewRequested(owner: String, repo: String, login: String) async throws -> [GitHubIssue] {
+        try await issueSearch("repo:\(owner)/\(repo)+is:pr+is:open+review-requested:\(login)")
+    }
+
+    /// Shared search/issues query (issues and PRs live in the same index).
+    private func issueSearch(_ q: String) async throws -> [GitHubIssue] {
         let path = "/search/issues?q=\(q)&per_page=50&sort=updated"
         struct Result: Decodable { let items: [GitHubIssue] }
         let result: Result = try await send(request("GET", path), as: Result.self)
-        return result.items.filter { $0.pullRequest == nil }
+        return result.items
+    }
+
+    // MARK: API: issue events (what changed, and who did it)
+
+    struct GitHubIssueEvent: Decodable, Hashable {
+        let id: Int64
+        let event: String
+        let actor: GitHubUser?
+        /// Who was assigned, for "assigned" events.
+        let assignee: GitHubUser?
+        let createdAt: String
+
+        enum CodingKeys: String, CodingKey {
+            case id, event, actor, assignee
+            case createdAt = "created_at"
+        }
+
+        /// Events that represent a real change to the issue (for the
+        /// activity feed's "someone else updated my ticket"). Mentions and
+        /// references have their own feed reasons; cross-references are
+        /// noise. Assignment is handled separately (self-assign filtering).
+        static let changeEvents: Set<String> = [
+            "labeled", "unlabeled", "milestoned", "demilestoned",
+            "renamed", "closed", "reopened", "merged",
+            "head_ref_deleted", "head_ref_restored",
+            "locked", "unlocked", "pinned", "unpinned", "transferred",
+            "review_requested", "review_request_removed",
+        ]
+    }
+
+    /// Timeline events for one issue/PR (first page, 100 events).
+    func issueEvents(owner: String, repo: String, number: Int) async throws -> [GitHubIssueEvent] {
+        let path = try repoPath(owner: owner, repo: repo) + "/issues/\(number)/events?per_page=100"
+        return try await send(request("GET", path), as: [GitHubIssueEvent].self)
     }
 }

@@ -1,65 +1,65 @@
 import SwiftUI
 
-// MARK: - GitHub mentions view (issues mentioning me across an account's repos)
+// MARK: - GitHub activity view (everything impacting me across an account's repos)
 
-struct GitHubMentionsView: View {
+struct GitHubActivityView: View {
     @EnvironmentObject var store: TodoStore
 
     let account: GitHubAccount
     let repos: [GitHubRepo]
     let token: String
 
-    @StateObject private var holder: GitHubMentionsModelHolder
+    @StateObject private var holder: GitHubActivityModelHolder
 
     init(account: GitHubAccount, repos: [GitHubRepo], token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.repos = repos
         self.token = token
-        _holder = StateObject(wrappedValue: GitHubMentionsModelHolder(
+        _holder = StateObject(wrappedValue: GitHubActivityModelHolder(
             account: account, repos: repos, token: token, cache: cache
         ))
     }
 
-    final class GitHubMentionsModelHolder: ObservableObject {
-        let model: GitHubMentionsModel
+    final class GitHubActivityModelHolder: ObservableObject {
+        let model: GitHubActivityModel
         init(account: GitHubAccount, repos: [GitHubRepo], token: String, cache: BoardCaching?) {
-            self.model = GitHubMentionsModel(account: account, repos: repos, token: token, cache: cache)
+            self.model = GitHubActivityModel(account: account, repos: repos, token: token, cache: cache)
         }
     }
 
     var body: some View {
-        GitHubMentionsContent(model: holder.model)
+        GitHubActivityContent(model: holder.model)
     }
 }
 
-private struct GitHubMentionsContent: View {
+private struct GitHubActivityContent: View {
     @EnvironmentObject var store: TodoStore
     @EnvironmentObject var appModel: AppModel
-    @ObservedObject var model: GitHubMentionsModel
+    @ObservedObject var model: GitHubActivityModel
 
-    /// Read tickets stay hidden unless this is checked. Persists per account.
+    /// Read activities stay hidden unless this is checked. Persists per account.
     @State private var showRead: Bool
 
-    private var showReadScope: String { "github-mentions-\(model.account.id)" }
+    private var showReadScope: String { "github-activity-\(model.account.id)" }
 
-    init(model: GitHubMentionsModel) {
+    init(model: GitHubActivityModel) {
         self.model = model
-        _showRead = State(initialValue: AppPreferences.showRead(scope: "github-mentions-\(model.account.id)"))
+        _showRead = State(initialValue: AppPreferences.showRead(scope: "github-activity-\(model.account.id)"))
     }
 
-    private var visible: [GitHubMentionedIssue] {
+    private var visible: [GitHubActivityEntry] {
         showRead
-            ? model.mentioned
-            : model.mentioned.filter { !store.readIssueKeys.contains($0.readKey) }
+            ? model.activity
+            : model.activity.filter { !store.readIssueKeys.contains($0.readKey) }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: "person.crop.circle.badge.exclamationmark")
+                Image(systemName: "bell.badge")
                     .font(.system(size: 13))
                     .foregroundStyle(.tint)
-                Text("Mentions @\(model.account.login)")
+                Text("Activity @\(model.account.login)")
                     .font(.system(size: 14, weight: .semibold))
                 if let updated = model.lastUpdated {
                     Text("\(model.showingCached ? "cached" : "updated") \(updated.formatted(date: .omitted, time: .shortened))")
@@ -90,11 +90,11 @@ private struct GitHubMentionsContent: View {
                 ErrorBanner(message: error, onDismiss: { model.lastError = nil })
             } else if visible.isEmpty && !model.isLoading {
                 ContentUnavailableView(
-                    model.mentioned.isEmpty ? "No mentions" : "All read",
-                    systemImage: model.mentioned.isEmpty ? "bell.slash" : "checkmark.seal",
-                    description: Text(model.mentioned.isEmpty
-                        ? "Nothing mentions @\(model.account.login)."
-                        : "You've read every mention — check “Show read” to see them again.")
+                    model.activity.isEmpty ? "No activity" : "All read",
+                    systemImage: model.activity.isEmpty ? "bell.slash" : "checkmark.seal",
+                    description: Text(model.activity.isEmpty
+                        ? "Nothing needs @\(model.account.login)'s attention."
+                        : "You're all caught up — check “Show read” to see everything again.")
                 )
                 // Claim the remaining space so the VStack keeps the window
                 // height and the header stays pinned to the top (otherwise
@@ -102,25 +102,28 @@ private struct GitHubMentionsContent: View {
                 // floats mid-screen).
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(visible) { item in
+                List(visible) { entry in
                     Button {
-                        open(item)
+                        open(entry)
                     } label: {
-                        // Same card design as the Jira mentions page; the
-                        // repo label keeps cross-repo context.
-                        GitHubCardView(issue: item.issue, isSelected: false, repoName: item.repo.name)
-                            .padding(.vertical, 2)
-                            .opacity(store.readIssueKeys.contains(item.readKey) ? 0.55 : 1)
+                        VStack(alignment: .leading, spacing: 4) {
+                            ActivityReasonTag(reason: entry.reason, actor: entry.actor, at: entry.activityAt)
+                            // Same card design as the Jira activity page;
+                            // the repo label keeps cross-repo context.
+                            GitHubCardView(issue: entry.issue, isSelected: false, repoName: entry.repo.name)
+                        }
+                        .padding(.vertical, 2)
+                        .opacity(store.readIssueKeys.contains(entry.readKey) ? 0.55 : 1)
                     }
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
                     .pointingHandOnHover()
                     .contextMenu {
-                        Button(store.readIssueKeys.contains(item.readKey) ? "Mark as Unread" : "Mark as Read") {
-                            if store.readIssueKeys.contains(item.readKey) {
-                                store.markIssueUnread(item.readKey)
+                        Button(store.readIssueKeys.contains(entry.readKey) ? "Mark as Unread" : "Mark as Read") {
+                            if store.readIssueKeys.contains(entry.readKey) {
+                                store.markIssueUnread(entry.readKey)
                             } else {
-                                store.markIssueRead(item.readKey)
+                                store.markIssueRead(entry.readKey)
                             }
                         }
                     }
@@ -134,14 +137,14 @@ private struct GitHubMentionsContent: View {
         }
     }
 
-    /// Mark the issue read and open its detail sheet. An ephemeral board
+    /// Mark the activity read and open its detail sheet. An ephemeral board
     /// model supplies the detail view's client and optimistic-update hooks
     /// without touching any real board's state.
-    private func open(_ item: GitHubMentionedIssue) {
-        store.markIssueRead(item.readKey)
-        let board = GitHubBoardModel(account: model.account, repo: item.repo, token: model.token)
+    private func open(_ entry: GitHubActivityEntry) {
+        store.markIssueRead(entry.readKey)
+        let board = GitHubBoardModel(account: model.account, repo: entry.repo, token: model.token)
         appModel.issueDetailTarget = IssueDetailTarget(content: .githubIssue(
-            account: model.account, board: board, issue: item.issue
+            account: model.account, board: board, issue: entry.issue
         ))
     }
 }

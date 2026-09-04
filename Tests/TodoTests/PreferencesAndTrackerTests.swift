@@ -34,7 +34,7 @@ import Foundation
         #expect(AppPreferences.showRead(scope: scope) == true)
     }
 
-    // MARK: MentionsTracker
+    // MARK: ActivityTracker
 
     /// A tick with accounts that have no tokens (and no network) must
     /// complete without throwing, skip those accounts, and — crucially —
@@ -57,15 +57,15 @@ import Foundation
             jql: nil, boardID: nil
         )
 
-        let tracker = MentionsTracker()
+        let tracker = ActivityTracker()
         // Simulate a previous tick that saw mentions for a long-gone account.
-        tracker.jiraMentionKeysForTesting = [999: ["TST-1"]]
-        tracker.githubMentionKeysForTesting = [999: ["org/repo#1"]]
+        tracker.jiraActivityKeysForTesting = [999: ["TST-1"]]
+        tracker.githubActivityKeysForTesting = [999: ["org/repo#1"]]
 
         // No tokens → every account is skipped; no network happens.
         await tracker.tick(store: store, jiraTokens: [:], githubTokens: [:])
 
-        #expect(tracker.jiraMentionKeys.isEmpty)
-        #expect(tracker.githubMentionKeys.isEmpty)
+        #expect(tracker.jiraActivityKeys.isEmpty)
+        #expect(tracker.githubActivityKeys.isEmpty)
     }
 }

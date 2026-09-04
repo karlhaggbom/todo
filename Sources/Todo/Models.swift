@@ -144,6 +144,15 @@ struct JiraCommentPage: Codable, Hashable {
     struct Comment: Codable, Identifiable, Hashable {
         struct Author: Codable, Hashable {
             let displayName: String
+            /// Account id — present on server responses, nil on synthesized
+            /// (optimistic) comments. Lets the activity feed tell “comment
+            /// by someone else” from my own.
+            let accountId: String?
+
+            init(displayName: String, accountId: String? = nil) {
+                self.displayName = displayName
+                self.accountId = accountId
+            }
         }
         let id: String
         let author: Author?

@@ -33,8 +33,8 @@ public struct RootView: View {
 
     // Local board keyboard adapter.
     @State private var localBoard: LocalBoardModel?
-    /// Background mention polling (5 min) for the sidebar unread badges.
-    @StateObject private var mentionsTracker = MentionsTracker()
+    /// Background activity polling (5 min) for the sidebar unread badges.
+    @StateObject private var activityTracker = ActivityTracker()
 
     public var body: some View {
         NavigationSplitView {
@@ -143,12 +143,12 @@ public struct RootView: View {
         .onAppear { reloadJiraTokens(); reloadGitHubTokens() }
         .onReceive(store.$jiraAccounts) { _ in reloadJiraTokens() }
         .onReceive(store.$githubAccounts) { _ in reloadGitHubTokens() }
-        // Refresh mention badges at launch, then every 5 minutes. The
+        // Refresh activity badges at launch, then every 5 minutes. The
         // models' cache logic keeps repeated ticks cheap (< 60s-old
         // snapshots skip the network entirely).
         .task {
             while !Task.isCancelled {
-                await mentionsTracker.tick(
+                await activityTracker.tick(
                     store: store, jiraTokens: jiraTokens, githubTokens: githubTokens
                 )
                 try? await Task.sleep(for: .seconds(300))
@@ -374,7 +374,7 @@ public struct RootView: View {
                     }
             }
             mentionsRow(unread: githubUnreadCount(account.id))
-                .tag(SidebarSection.githubMentions(account.id))
+                .tag(SidebarSection.githubActivity(account.id))
             Button {
                 addRepoAccount = account
             } label: {
@@ -384,9 +384,9 @@ public struct RootView: View {
         } label: {
             HStack(spacing: 6) {
                 Label(account.name, systemImage: "globe")
-                // Collapsed with unread mentions: red dot so "something
+                // Collapsed with unread activity: red dot so "something
                 // happened" is visible without expanding. When expanded,
-                // the Mentions row badge carries the count instead.
+                // the Activity row badge carries the count instead.
                 if !expandedGitHubAccounts.contains(account.id), githubUnreadCount(account.id) > 0 {
                     Circle().fill(.red).frame(width: 7, height: 7)
                 }
@@ -395,7 +395,7 @@ public struct RootView: View {
                     Button("Delete Account") {
                         _ = try? store.deleteGitHubAccount(account.id)
                         switch model.selectedSidebarSection {
-                        case .githubMentions(account.id):
+                        case .githubActivity(account.id):
                             model.selectedSidebarSection = .local
                         case .githubSpace(let repoID):
                             // Reset if the deleted account owns the open board.
@@ -411,26 +411,26 @@ public struct RootView: View {
         .id("github-account-\(account.id)")
     }
 
-    /// Unread mentions for a Jira account: raw mention keys minus the
-    /// (published) read set, computed at render time so opening a mention
+    /// Unread activity for a Jira account: raw activity keys minus the
+    /// (published) read set, computed at render time so opening a row
     /// updates the badge instantly. 0 hides the badge.
     private func jiraUnreadCount(_ accountID: Int64) -> Int {
-        mentionsTracker.jiraMentionKeys[accountID]?
+        activityTracker.jiraActivityKeys[accountID]?
             .subtracting(store.readIssueKeys).count ?? 0
     }
 
     private func githubUnreadCount(_ accountID: Int64) -> Int {
-        mentionsTracker.githubMentionKeys[accountID]?
+        activityTracker.githubActivityKeys[accountID]?
             .subtracting(store.readIssueKeys).count ?? 0
     }
 
-    /// Sidebar "Mentions" row with a trailing unread badge. Hand-rolled
+    /// Sidebar "Activity" row with a trailing unread badge. Hand-rolled
     /// instead of `.badge()`: on macOS, badge modifiers inside sidebar
     /// List rows break the row's click-through (the row stops selecting
     /// once a badge is attached), and plain row content does not.
     private func mentionsRow(unread: Int) -> some View {
         HStack(spacing: 6) {
-            Label("Mentions", systemImage: "person.crop.circle.badge.exclamationmark")
+            Label("Activity", systemImage: "bell.badge")
             Spacer(minLength: 0)
             if unread > 0 {
                 Text("\(unread)")
@@ -465,7 +465,7 @@ public struct RootView: View {
                     .tag(SidebarSection.jiraSpace(space.id))
             }
             mentionsRow(unread: jiraUnreadCount(account.id))
-                .tag(SidebarSection.jiraMentions(account.id))
+                .tag(SidebarSection.jiraActivity(account.id))
             Button {
                 addSpaceAccount = account
             } label: {
@@ -475,9 +475,9 @@ public struct RootView: View {
         } label: {
             HStack(spacing: 6) {
                 Label(account.name, systemImage: "globe")
-                // Collapsed with unread mentions: red dot so "something
+                // Collapsed with unread activity: red dot so "something
                 // happened" is visible without expanding. When expanded,
-                // the Mentions row badge carries the count instead.
+                // the Activity row badge carries the count instead.
                 if !expandedJiraAccounts.contains(account.id), jiraUnreadCount(account.id) > 0 {
                     Circle().fill(.red).frame(width: 7, height: 7)
                 }
@@ -486,7 +486,7 @@ public struct RootView: View {
         .contextMenu {
             Button("Delete Account") {
                 _ = try? store.deleteJiraAccount(account.id)
-                if case .jiraMentions(account.id) = model.selectedSidebarSection {
+                if case .jiraActivity(account.id) = model.selectedSidebarSection {
                     model.selectedSidebarSection = .local
                 }
             }
@@ -513,16 +513,16 @@ public struct RootView: View {
                 ContentUnavailableView("Space unavailable", systemImage: "questionmark.circle")
             }
 
-        case .jiraMentions(let accountID):
+        case .jiraActivity(let accountID):
             if let account = store.jiraAccounts.first(where: { $0.id == accountID }),
                let space = store.jiraSpaces.first(where: { $0.accountID == accountID }),
                let token = jiraTokens[accountID] {
-                MentionsView(account: account, space: space, token: token, cache: store)
+                ActivityView(account: account, space: space, token: token, cache: store)
             } else {
                 ContentUnavailableView(
                     "No Space",
                     systemImage: "rectangle.stack.badge.plus",
-                    description: Text("Add a Space (project) to this account to see mentions.")
+                    description: Text("Add a Space (project) to this account to see activity.")
                 )
             }
 
@@ -537,7 +537,7 @@ public struct RootView: View {
                 ContentUnavailableView("Repo unavailable", systemImage: "questionmark.circle")
             }
 
-        case .githubMentions(let accountID):
+        case .githubActivity(let accountID):
             if let account = store.githubAccounts.first(where: { $0.id == accountID }),
                let token = githubTokens[accountID] {
                 let repos = store.githubRepos.filter { $0.accountID == accountID }
@@ -545,10 +545,10 @@ public struct RootView: View {
                     ContentUnavailableView(
                         "No Repo",
                         systemImage: "rectangle.stack.badge.plus",
-                        description: Text("Add a Repo to this account to see mentions.")
+                        description: Text("Add a Repo to this account to see activity.")
                     )
                 } else {
-                    GitHubMentionsView(account: account, repos: repos, token: token, cache: store)
+                    GitHubActivityView(account: account, repos: repos, token: token, cache: store)
                 }
             } else {
                 ContentUnavailableView("Account unavailable", systemImage: "questionmark.circle")

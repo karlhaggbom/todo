@@ -411,7 +411,7 @@ public final class AppModel: ObservableObject {
 enum SidebarSection: Hashable {
     case local
     case jiraSpace(JiraSpace.ID)
-    case jiraMentions(JiraAccount.ID)
+    case jiraActivity(JiraAccount.ID)
     case githubSpace(GitHubRepo.ID)
-    case githubMentions(GitHubAccount.ID)
+    case githubActivity(GitHubAccount.ID)
 }

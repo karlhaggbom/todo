@@ -1,67 +1,67 @@
 import SwiftUI
 
-// MARK: - Mentions view (issues mentioning me in one project)
+// MARK: - Activity view (everything impacting me in one project)
 
-struct MentionsView: View {
+struct ActivityView: View {
     @EnvironmentObject var store: TodoStore
 
     let account: JiraAccount
     let space: JiraSpace
     let token: String
 
-    @StateObject private var holder: MentionsModelHolder
+    @StateObject private var holder: ActivityModelHolder
 
     init(account: JiraAccount, space: JiraSpace, token: String, cache: BoardCaching? = nil) {
         self.account = account
         self.space = space
         self.token = token
-        _holder = StateObject(wrappedValue: MentionsModelHolder(
+        _holder = StateObject(wrappedValue: ActivityModelHolder(
             account: account, space: space, token: token, cache: cache
         ))
     }
 
-    final class MentionsModelHolder: ObservableObject {
-        let model: MentionsModel
+    final class ActivityModelHolder: ObservableObject {
+        let model: ActivityModel
         init(account: JiraAccount, space: JiraSpace, token: String, cache: BoardCaching?) {
-            self.model = MentionsModel(account: account, space: space, token: token, cache: cache)
+            self.model = ActivityModel(account: account, space: space, token: token, cache: cache)
         }
     }
 
     var body: some View {
-        MentionsContent(model: holder.model, space: space)
+        ActivityContent(model: holder.model, space: space)
     }
 }
 
-private struct MentionsContent: View {
+private struct ActivityContent: View {
     @EnvironmentObject var store: TodoStore
     @EnvironmentObject var appModel: AppModel
-    @ObservedObject var model: MentionsModel
+    @ObservedObject var model: ActivityModel
     let space: JiraSpace
 
-    /// Read tickets stay hidden unless this is checked. Persists per space.
+    /// Read activities stay hidden unless this is checked. Persists per space.
     @State private var showRead: Bool
 
-    private var showReadScope: String { "jira-mentions-\(space.id)" }
+    private var showReadScope: String { "jira-activity-\(space.id)" }
 
-    init(model: MentionsModel, space: JiraSpace) {
+    init(model: ActivityModel, space: JiraSpace) {
         self.model = model
         self.space = space
-        _showRead = State(initialValue: AppPreferences.showRead(scope: "jira-mentions-\(space.id)"))
+        _showRead = State(initialValue: AppPreferences.showRead(scope: "jira-activity-\(space.id)"))
     }
 
-    private var visible: [JiraIssue] {
+    private var visible: [JiraActivityEntry] {
         showRead
-            ? model.mentioned
-            : model.mentioned.filter { !store.readIssueKeys.contains($0.key) }
+            ? model.activity
+            : model.activity.filter { !store.readIssueKeys.contains($0.readKey) }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: "person.crop.circle.badge.exclamationmark")
+                Image(systemName: "bell.badge")
                     .font(.system(size: 13))
                     .foregroundStyle(.tint)
-                Text("Mentions in \(space.name)")
+                Text("Activity in \(space.name)")
                     .font(.system(size: 14, weight: .semibold))
                 if let updated = model.lastUpdated {
                     Text("\(model.showingCached ? "cached" : "updated") \(updated.formatted(date: .omitted, time: .shortened))")
@@ -92,11 +92,11 @@ private struct MentionsContent: View {
                 ErrorBanner(message: error, onDismiss: { model.lastError = nil })
             } else if visible.isEmpty && !model.isLoading {
                 ContentUnavailableView(
-                    model.mentioned.isEmpty ? "No mentions" : "All read",
-                    systemImage: model.mentioned.isEmpty ? "bell.slash" : "checkmark.seal",
-                    description: Text(model.mentioned.isEmpty
-                        ? "Nothing in \(space.projectKey) mentions you."
-                        : "You've read every mention — check “Show read” to see them again.")
+                    model.activity.isEmpty ? "No activity" : "All read",
+                    systemImage: model.activity.isEmpty ? "bell.slash" : "checkmark.seal",
+                    description: Text(model.activity.isEmpty
+                        ? "Nothing in \(space.projectKey) needs your attention."
+                        : "You're all caught up — check “Show read” to see everything again.")
                 )
                 // Claim the remaining space so the VStack keeps the window
                 // height and the header stays pinned to the top (otherwise
@@ -104,23 +104,26 @@ private struct MentionsContent: View {
                 // floats mid-screen).
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(visible) { issue in
+                List(visible) { entry in
                     Button {
-                        open(issue)
+                        open(entry)
                     } label: {
-                        JiraCardView(issue: issue, isSelected: false)
-                            .padding(.vertical, 2)
-                            .opacity(store.readIssueKeys.contains(issue.key) ? 0.55 : 1)
+                        VStack(alignment: .leading, spacing: 4) {
+                            ActivityReasonTag(reason: entry.reason, actor: entry.actor, at: entry.activityAt)
+                            JiraCardView(issue: entry.issue, isSelected: false)
+                        }
+                        .padding(.vertical, 2)
+                        .opacity(store.readIssueKeys.contains(entry.readKey) ? 0.55 : 1)
                     }
                     .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
                     .pointingHandOnHover()
                     .contextMenu {
-                        Button(store.readIssueKeys.contains(issue.key) ? "Mark as Unread" : "Mark as Read") {
-                            if store.readIssueKeys.contains(issue.key) {
-                                store.markIssueUnread(issue.key)
+                        Button(store.readIssueKeys.contains(entry.readKey) ? "Mark as Unread" : "Mark as Read") {
+                            if store.readIssueKeys.contains(entry.readKey) {
+                                store.markIssueUnread(entry.readKey)
                             } else {
-                                store.markIssueRead(issue.key)
+                                store.markIssueRead(entry.readKey)
                             }
                         }
                     }
@@ -134,14 +137,14 @@ private struct MentionsContent: View {
         }
     }
 
-    /// Mark the issue read and open its detail sheet. An ephemeral board
+    /// Mark the activity read and open its detail sheet. An ephemeral board
     /// model supplies the detail view's client and optimistic-update hooks
     /// without touching any real board's state.
-    private func open(_ issue: JiraIssue) {
-        store.markIssueRead(issue.key)
+    private func open(_ entry: JiraActivityEntry) {
+        store.markIssueRead(entry.readKey)
         let board = JiraBoardModel(account: model.account, space: space, token: model.token)
         appModel.issueDetailTarget = IssueDetailTarget(content: .jiraTicket(
-            account: model.account, board: board, issue: issue
+            account: model.account, board: board, issue: entry.issue
         ))
     }
 }

@@ -500,34 +500,45 @@ import Foundation
 
     /// Mentions snapshots must survive the JSON encode/decode the cache does;
     /// the GitHub entry embeds a repo, so it exercises the nested Codable path.
-    @Test func mentionsCacheSnapshotsRoundTrip() throws {
-        let jiraSnapshot: [JiraIssue] = [
-            JiraIssue(key: "TAP-1", fields: .init(
-                summary: "You were mentioned",
-                description: nil,
-                status: .init(name: "In Progress", statusCategory: .init(key: "indeterminate")),
-                issuetype: .init(name: "Task", iconURL: nil),
-                assignee: nil,
-                priority: nil,
-                updated: "2026-09-04T08:00:00.000+0000"
-            ))
+    @Test func activityCacheSnapshotsRoundTrip() throws {
+        let jiraSnapshot: [JiraActivityEntry] = [
+            JiraActivityEntry(
+                reason: .comment,
+                issue: JiraIssue(key: "TAP-1", fields: .init(
+                    summary: "You were mentioned",
+                    description: nil,
+                    status: .init(name: "In Progress", statusCategory: .init(key: "indeterminate")),
+                    issuetype: .init(name: "Task", iconURL: nil),
+                    assignee: nil,
+                    priority: nil,
+                    updated: "2026-09-04T08:00:00.000+0000"
+                )),
+                activityAt: "2026-09-05T10:00:00.000+0000",
+                actor: "Jane Doe"
+            )
         ]
         let jiraData = try JSONEncoder().encode(jiraSnapshot)
-        let jiraBack = try JSONDecoder().decode([JiraIssue].self, from: jiraData)
+        let jiraBack = try JSONDecoder().decode([JiraActivityEntry].self, from: jiraData)
         #expect(jiraBack == jiraSnapshot)
 
         let repo = GitHubRepo(id: 7, accountID: 3, name: "ais", owner: "some-org", repo: "ais")
-        let ghSnapshot: [GitHubMentionedIssue] = [
-            GitHubMentionedIssue(repo: repo, issue: GitHubIssue(
-                number: 42, title: "Mentioned here", body: nil, state: "open",
-                stateReason: nil, htmlURL: "https://example.com/42", updatedAt: "2026-09-04T08:00:00Z",
-                labels: [], assignees: [], pullRequest: nil
-            ))
+        let ghSnapshot: [GitHubActivityEntry] = [
+            GitHubActivityEntry(
+                reason: .reviewRequested,
+                repo: repo,
+                issue: GitHubIssue(
+                    number: 42, title: "Review me", body: nil, state: "open",
+                    stateReason: nil, htmlURL: "https://example.com/42", updatedAt: "2026-09-04T08:00:00Z",
+                    labels: [], assignees: [], pullRequest: .init()
+                ),
+                activityAt: "2026-09-04T08:00:00Z",
+                actor: nil
+            )
         ]
         let ghData = try JSONEncoder().encode(ghSnapshot)
-        let ghBack = try JSONDecoder().decode([GitHubMentionedIssue].self, from: ghData)
+        let ghBack = try JSONDecoder().decode([GitHubActivityEntry].self, from: ghData)
         #expect(ghBack == ghSnapshot)
-        #expect(ghBack.first?.readKey == "some-org/ais#42")
+        #expect(ghBack.first?.readKey == "some-org/ais#42@2026-09-04T08:00:00Z")
     }
 
     @Test func readIssuesPersistAcrossStoreReloads() throws {
