@@ -95,6 +95,25 @@ import Foundation
     #expect(JiraActivityEntry.newest(dated, broken).reason == .assigned)
 }
 
+@Test func trayUnreadCountSubtractsReadSetAcrossAccounts() {
+    let jira: [Int64: Set<String>] = [
+        1: ["TAP-1@t1", "TAP-2@t2", "TAP-3@t3"],
+        2: ["BUG-9@t9"],
+    ]
+    let github: [Int64: Set<String>] = [
+        3: ["org/r#5@t5", "org/r#6@t6"],
+        4: [],
+    ]
+    let read: Set<String> = ["TAP-1@t1", "org/r#5@t5"]
+    // 2 unread on Jira (TAP-2, TAP-3) + 1 on Jira acct 2 + 1 on GitHub.
+    #expect(TrayIconController.unreadCount(jira: jira, github: github, read: read) == 4)
+    // Everything read → 0 (icon unbadges).
+    let all = Set(jira.values.flatMap { $0 } + github.values.flatMap { $0 })
+    #expect(TrayIconController.unreadCount(jira: jira, github: github, read: all) == 0)
+    // No accounts at all → 0.
+    #expect(TrayIconController.unreadCount(jira: [:], github: [:], read: []) == 0)
+}
+
 private func ghIssue(number: Int, updatedAt: String) -> GitHubIssue {
     GitHubIssue(
         number: number, title: "t", body: nil, state: "open",

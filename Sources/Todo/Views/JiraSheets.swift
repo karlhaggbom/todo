@@ -55,6 +55,11 @@ private struct ActivityContent: View {
             : model.activity.filter { !store.readIssueKeys.contains($0.readKey) }
     }
 
+    /// Unread activities in the feed; 0 disables "Mark all as read".
+    private var visibleUnreadCount: Int {
+        model.activity.count { !store.readIssueKeys.contains($0.readKey) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
@@ -74,6 +79,16 @@ private struct ActivityContent: View {
                 }
                 Toggle("Show read", isOn: $showRead)
                     .toggleStyle(.checkbox)
+                Button {
+                    store.markAllRead(model.activity.map(\.readKey))
+                } label: {
+                    Text("Mark all as read")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .pointingHandOnHover()
+                .disabled(visibleUnreadCount == 0)
+                .help("Mark every activity as read")
                 Button {
                     Task { await model.load(force: true) }
                 } label: {

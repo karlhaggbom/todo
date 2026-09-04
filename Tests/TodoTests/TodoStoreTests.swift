@@ -541,6 +541,30 @@ import Foundation
         #expect(ghBack.first?.readKey == "some-org/ais#42@2026-09-04T08:00:00Z")
     }
 
+    @Test func markAllReadIsAtomicBatchAndPersists() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("todo-readall-\(UUID().uuidString).sqlite3")
+        let store = try TodoStore(databasePath: url.path)
+
+        // Batch marks everything unread in one transaction.
+        store.markAllRead([
+            "TAP-1@2026-09-04T08:00:00.000+0000",
+            "org/r#5@2026-09-04T08:00:00Z",
+            "TAP-1@2026-09-04T08:00:00.000+0000", // dup ignored
+        ])
+        #expect(store.readIssueKeys.count == 2)
+
+        // Empty batch and already-read batch are no-ops.
+        store.markAllRead([])
+        store.markAllRead(["TAP-1@2026-09-04T08:00:00.000+0000"])
+        #expect(store.readIssueKeys.count == 2)
+
+        // The batch write persists like individual marks.
+        let reopened = try TodoStore(databasePath: url.path)
+        #expect(reopened.readIssueKeys.count == 2)
+        #expect(reopened.readIssueKeys.contains("org/r#5@2026-09-04T08:00:00Z"))
+    }
+
     @Test func readIssuesPersistAcrossStoreReloads() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("todo-read-\(UUID().uuidString).sqlite3")

@@ -313,36 +313,28 @@ final class GitHubActivityModel: ObservableObject {
         lastError = nil
         do {
             var byId: [String: GitHubActivityEntry] = [:]
-            for repo in repos {
-                // Three searches in parallel: mentions, assignments
-                // (issues + PRs), and PRs awaiting my review.
-                async let mentionsTask = client.issuesMentioning(
-                    owner: repo.owner, repo: repo.repo, login: account.login
+            // One GraphQL request covers all repos' three searches; the
+            // per-repo REST searches remain as a fallback (e.g. GitHub
+            // Enterprise without GraphQL enabled).
+            let hits: [GitHubClient.GitHubActivityHit]
+            do {
+                hits = try await client.activitySearch(repos: repos, login: account.login)
+            } catch {
+                Diag.log.error("graphql activity search failed, falling back to REST: \(error.localizedDescription, privacy: .public)")
+                hits = try await restActivitySearch()
+            }
+            for hit in hits {
+                let entry = GitHubActivityEntry(
+                    reason: hit.reason, repo: hit.repo, issue: hit.issue,
+                    activityAt: hit.issue.updatedAt, actor: nil
                 )
-                async let assignedTask = client.issuesAssigned(
-                    owner: repo.owner, repo: repo.repo, login: account.login
-                )
-                async let reviewTask = client.prsReviewRequested(
-                    owner: repo.owner, repo: repo.repo, login: account.login
-                )
-                let (mentions, assigned, reviews) = try await (mentionsTask, assignedTask, reviewTask)
-                for issue in mentions {
-                    byId["\(repo.id)-\(issue.number)"] = GitHubActivityEntry(
-                        reason: .mention, repo: repo, issue: issue,
-                        activityAt: issue.updatedAt ?? "", actor: nil
-                    )
-                }
-                for pr in reviews {
-                    let entry = GitHubActivityEntry(
-                        reason: .reviewRequested, repo: repo, issue: pr,
-                        activityAt: pr.updatedAt ?? "", actor: nil
-                    )
+                byId[entry.id] = byId[entry.id].map { GitHubActivityEntry.newest($0, entry) } ?? entry
+            }
+            // Deeper analysis only for the assigned hits: what did other
+            // people do on my issues/PRs?
+            for hit in hits where hit.reason == .assigned {
+                if let entry = await assignedEntry(hit.issue, in: hit.repo) {
                     byId[entry.id] = byId[entry.id].map { GitHubActivityEntry.newest($0, entry) } ?? entry
-                }
-                for issue in assigned {
-                    if let entry = await assignedEntry(issue, in: repo) {
-                        byId[entry.id] = byId[entry.id].map { GitHubActivityEntry.newest($0, entry) } ?? entry
-                    }
                 }
             }
             let fresh = Self.sorted(Array(byId.values))
@@ -359,11 +351,44 @@ final class GitHubActivityModel: ObservableObject {
         isLoading = false
     }
 
+    /// Legacy search path: three REST searches per repo. Blows the search
+    /// API's 30-requests/minute cap with several repos — used only when
+    /// the GraphQL request fails outright.
+    private func restActivitySearch() async throws -> [GitHubClient.GitHubActivityHit] {
+        var hits: [GitHubClient.GitHubActivityHit] = []
+        for repo in repos {
+            async let mentionsTask = client.issuesMentioning(
+                owner: repo.owner, repo: repo.repo, login: account.login
+            )
+            async let assignedTask = client.issuesAssigned(
+                owner: repo.owner, repo: repo.repo, login: account.login
+            )
+            async let reviewTask = client.prsReviewRequested(
+                owner: repo.owner, repo: repo.repo, login: account.login
+            )
+            let (mentions, assigned, reviews) = try await (mentionsTask, assignedTask, reviewTask)
+            hits += mentions.map { GitHubClient.GitHubActivityHit(repo: repo, reason: .mention, issue: $0) }
+            hits += assigned.map { GitHubClient.GitHubActivityHit(repo: repo, reason: .assigned, issue: $0) }
+            hits += reviews.map { GitHubClient.GitHubActivityHit(repo: repo, reason: .reviewRequested, issue: $0) }
+        }
+        return hits
+    }
+
     /// Analyze one issue/PR assigned to me: someone else's comment, their
     /// change, or — with no other activity — the assignment itself.
     /// Returns nil when the only activity is my own (self-assignment,
     /// my own edits): own updates must never create feed entries.
     private func assignedEntry(_ issue: GitHubIssue, in repo: GitHubRepo) async -> GitHubActivityEntry? {
+        // Issues untouched for a month can't hold recent activity — skip
+        // their two per-issue API calls entirely (the entry stays, as the
+        // plain assignment).
+        if let updated = parseActivityDate(issue.updatedAt),
+           Date().timeIntervalSince(updated) > 30 * 24 * 3600 {
+            return GitHubActivityEntry(
+                reason: .assigned, repo: repo, issue: issue,
+                activityAt: issue.updatedAt, actor: nil
+            )
+        }
         let comments = (try? await client.comments(owner: repo.owner, repo: repo.repo, number: issue.number)) ?? []
         let events = (try? await client.issueEvents(owner: repo.owner, repo: repo.repo, number: issue.number)) ?? []
         let myLogin = account.login.lowercased()

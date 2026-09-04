@@ -35,6 +35,9 @@ public struct RootView: View {
     @State private var localBoard: LocalBoardModel?
     /// Background activity polling (5 min) for the sidebar unread badges.
     @StateObject private var activityTracker = ActivityTracker()
+    /// Tray icon — retained here for the whole session; deallocation (or
+    /// app quit) removes it from the menu bar.
+    @State private var tray: TrayIconController?
 
     public var body: some View {
         NavigationSplitView {
@@ -53,6 +56,9 @@ public struct RootView: View {
             }
             installKeyMonitor()
             installMouseMonitor()
+            if tray == nil {
+                tray = TrayIconController(store: store, tracker: activityTracker)
+            }
             // The window exists by the first runloop turn after appear.
             DispatchQueue.main.async {
                 if model.mainWindow == nil {

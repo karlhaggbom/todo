@@ -13,6 +13,7 @@ enum GitHubError: LocalizedError {
     case decode(String)
     case noToken
     case badRepo
+    case graphql(String)
 
     var errorDescription: String? {
         switch self {
@@ -21,6 +22,7 @@ enum GitHubError: LocalizedError {
         case .decode(let m): return "GitHub decode error: \(m)"
         case .noToken: return "Missing GitHub token in Keychain"
         case .badRepo: return "Invalid repository"
+        case .graphql(let message): return "GitHub GraphQL: \(message.prefix(300))"
         }
     }
 }
@@ -207,6 +209,177 @@ final class GitHubClient {
         struct Result: Decodable { let items: [GitHubIssue] }
         let result: Result = try await send(request("GET", path), as: Result.self)
         return result.items
+    }
+
+    // MARK: API: GraphQL activity search (ONE request for all repos)
+    //
+    // The REST search API hard-caps at 30 requests/minute, and three
+    // searches per repo blew through that. GraphQL allows every search to
+    // be aliased into a single request, paid from the 5000-points/hour
+    // GraphQL budget instead — ~6 points per aliased search.
+
+    /// One issue/PR found by the activity search, with why it matched.
+    struct GitHubActivityHit: Hashable {
+        let repo: GitHubRepo
+        let reason: ActivityReason
+        let issue: GitHubIssue
+    }
+
+    /// Fields shared by Issue and PullRequest search nodes. PullRequest
+    /// must NOT ask for stateReason (it doesn't have the field — asking
+    /// for it fails the WHOLE query with data:null).
+    private static let activityNodeFields =
+        "number title body state url updatedAt "
+        + "labels(first: 20) { nodes { name color } } "
+        + "assignees(first: 10) { nodes { login name } } "
+        + "repository { nameWithOwner }"
+
+    /// Builds the aliased search query plus the alias→(repo, reason) map.
+    /// Pure — unit-tested without network.
+    static func makeActivityQuery(repos: [GitHubRepo], login: String)
+        -> (query: String, aliases: [(alias: String, repo: GitHubRepo, reason: ActivityReason)])
+    {
+        // Logins can only contain [a-zA-Z0-9-], but stay safe inside the
+        // interpolated query string regardless.
+        let safe = login.replacingOccurrences(of: "\"", with: "")
+                     .replacingOccurrences(of: "\\", with: "")
+        var aliases: [(String, GitHubRepo, ActivityReason)] = []
+        var fields: [String] = []
+        for (i, repo) in repos.enumerated() {
+            let full = "\(repo.owner)/\(repo.repo)"
+            let specs: [(String, String, ActivityReason)] = [
+                ("m\(i)", "repo:\(full) is:issue mentions:\(safe)", .mention),
+                ("a\(i)", "repo:\(full) assignee:\(safe)", .assigned),
+                ("r\(i)", "repo:\(full) is:pr is:open review-requested:\(safe)", .reviewRequested),
+            ]
+            for spec in specs {
+                aliases.append((spec.0, repo, spec.2))
+                let nodes = "__typename "
+                    // Only Issue carries stateReason (NOT_PLANNED etc.).
+                    + "... on Issue { \(activityNodeFields) stateReason } "
+                    + "... on PullRequest { \(activityNodeFields) }"
+                fields.append(
+                    "\(spec.0): search(query: \"\(spec.1)\", type: ISSUE, first: 50) { nodes { \(nodes) } }"
+                )
+            }
+        }
+        return ("query { \(fields.joined(separator: " ")) }", aliases)
+    }
+
+    private func graphqlEndpoint() throws -> URL {
+        var url = try base()
+        // GHE serves GraphQL from the site root, not the REST prefix.
+        for suffix in ["/api/v3", "/api"] where url.hasSuffix(suffix) {
+            url.removeLast(suffix.count)
+        }
+        guard let endpoint = URL(string: url + "/graphql") else { throw GitHubError.badURL }
+        return endpoint
+    }
+
+    /// All activity searches for every repo in a single HTTP request.
+    func activitySearch(repos: [GitHubRepo], login: String) async throws -> [GitHubActivityHit] {
+        guard !repos.isEmpty else { return [] }
+        let (query, aliases) = Self.makeActivityQuery(repos: repos, login: login)
+        var req = URLRequest(url: try graphqlEndpoint())
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(credentials.token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
+
+        let envelope = try await send(req, as: GraphQLActivityEnvelope.self)
+        // GraphQL reports failures as HTTP 200 + errors with data null —
+        // surface that instead of silently seeing "no activity".
+        guard envelope.data != nil else {
+            let detail = envelope.errors?.compactMap(\.message).joined(separator: "; ") ?? "unknown GraphQL error"
+            throw GitHubError.graphql(detail)
+        }
+        return Self.parseActivityResponse(envelope, aliases: aliases)
+    }
+
+    // MARK: GraphQL response decoding
+
+    struct GraphQLConnection<T: Decodable>: Decodable { let nodes: [T]? }
+
+    struct GraphQLActivityNode: Decodable {
+        let __typename: String
+        let number: Int
+        let title: String
+        let body: String?
+        let state: String
+        let stateReason: String?
+        let url: String?
+        let updatedAt: String
+        let labels: GraphQLConnection<GitHubLabel>?
+        let assignees: GraphQLConnection<GitHubUser>?
+        let repository: Name?
+
+        struct Name: Decodable { let nameWithOwner: String? }
+
+        enum CodingKeys: String, CodingKey {
+            case __typename, number, title, body, state, stateReason
+            case url, updatedAt, labels, assignees, repository
+        }
+
+        /// Map into the app's REST-shaped issue (lowercase state enums;
+        /// PR-ness via the marker, like the REST payload would).
+        var issue: GitHubIssue {
+            GitHubIssue(
+                number: number,
+                title: title,
+                body: body,
+                state: state.lowercased(),
+                stateReason: stateReason?.lowercased(),
+                htmlURL: url,
+                updatedAt: updatedAt,
+                labels: labels?.nodes ?? [],
+                assignees: assignees?.nodes ?? [],
+                pullRequest: __typename == "PullRequest" ? GitHubPullRequestMarker() : nil
+            )
+        }
+    }
+
+    struct GraphQLActivityEnvelope: Decodable {
+        let data: GraphQLData?
+        let errors: [GraphQLError]?
+
+        struct GraphQLError: Decodable { let message: String? }
+        struct GraphQLData: Decodable {
+            let pages: [String: [GraphQLActivityNode]]
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: ArbitraryCodingKey.self)
+                var dict: [String: [GraphQLActivityNode]] = [:]
+                for key in container.allKeys {
+                    struct Page: Decodable { let nodes: [GraphQLActivityNode]? }
+                    let page = try container.decode(Page.self, forKey: key)
+                    dict[key.stringValue] = page.nodes ?? []
+                }
+                pages = dict
+            }
+        }
+        enum CodingKeys: String, CodingKey { case data, errors }
+    }
+
+    struct ArbitraryCodingKey: CodingKey {
+        var stringValue: String
+        init?(stringValue: String) { self.stringValue = stringValue }
+        var intValue: Int? { nil }
+        init?(intValue: Int) { nil }
+    }
+
+    /// Matches decoded alias pages back to their (repo, reason). Pure —
+    /// unit-tested with a fixture.
+    static func parseActivityResponse(
+        _ envelope: GraphQLActivityEnvelope,
+        aliases: [(alias: String, repo: GitHubRepo, reason: ActivityReason)]
+    ) -> [GitHubActivityHit] {
+        guard let data = envelope.data else { return [] }
+        var hits: [GitHubActivityHit] = []
+        for alias in aliases {
+            for node in data.pages[alias.alias] ?? [] {
+                hits.append(GitHubActivityHit(repo: alias.repo, reason: alias.reason, issue: node.issue))
+            }
+        }
+        return hits
     }
 
     // MARK: API: issue events (what changed, and who did it)

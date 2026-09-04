@@ -159,6 +159,29 @@ public final class TodoStore: ObservableObject {
         }
     }
 
+    /// Mark many activities read in one pass (the activity page's "Mark
+    /// all as read" button). Idempotent; one SQLite transaction, one
+    /// published update after the write has succeeded.
+    func markAllRead(_ keys: [String]) {
+        let unread = keys.filter { !readIssueKeys.contains($0) }
+        guard !unread.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
+        do {
+            try db.transaction {
+                for key in unread {
+                    try db.run("INSERT OR IGNORE INTO read_issues (key, read_at) VALUES (?, ?)") { st in
+                        st.bind(1, key)
+                        st.bind(2, now)
+                    }
+                }
+            }
+        } catch {
+            Diag.log.error("mark-all-read failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        readIssueKeys.formUnion(unread)
+    }
+
     /// Mark an issue as unread again (it reappears in the mentions list).
     /// Idempotent; writes through to SQLite immediately.
     func markIssueUnread(_ key: String) {
