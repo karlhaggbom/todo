@@ -76,7 +76,8 @@ public final class TodoStore: ObservableObject {
             account_id INTEGER NOT NULL REFERENCES jira_accounts(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             project_key TEXT NOT NULL,
-            jql TEXT
+            jql TEXT,
+            board_id INTEGER
         );
         CREATE TABLE IF NOT EXISTS github_accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,6 +99,11 @@ public final class TodoStore: ObservableObject {
         );
         CREATE INDEX IF NOT EXISTS idx_tasks_lane ON tasks(lane_id, position);
         """)
+        // Older databases predate the pinned-board column on jira_spaces.
+        let spaceColumns = try db.query("PRAGMA table_info(jira_spaces)", map: { $0.string("name") })
+        if !spaceColumns.contains("board_id") {
+            try db.execute("ALTER TABLE jira_spaces ADD COLUMN board_id INTEGER")
+        }
     }
 
     private func seedLanesIfNeeded() throws {
@@ -152,7 +158,7 @@ public final class TodoStore: ObservableObject {
     }
 
     private static func space(from st: SQLiteDatabase.Statement) -> JiraSpace {
-        JiraSpace(id: st.int("id"), accountID: st.int("account_id"), name: st.string("name"), projectKey: st.string("project_key"), jql: st.optionalString("jql"))
+        JiraSpace(id: st.int("id"), accountID: st.int("account_id"), name: st.string("name"), projectKey: st.string("project_key"), jql: st.optionalString("jql"), boardID: st.optionalInt("board_id"))
     }
 
     private static func gitHubAccount(from st: SQLiteDatabase.Statement) -> GitHubAccount {
@@ -404,12 +410,13 @@ public final class TodoStore: ObservableObject {
     }
 
     @discardableResult
-    func addJiraSpace(accountID: Int64, name: String, projectKey: String, jql: String?) throws -> JiraSpace {
-        try db.run("INSERT INTO jira_spaces (account_id, name, project_key, jql) VALUES (?, ?, ?, ?)") { st in
+    func addJiraSpace(accountID: Int64, name: String, projectKey: String, jql: String?, boardID: Int? = nil) throws -> JiraSpace {
+        try db.run("INSERT INTO jira_spaces (account_id, name, project_key, jql, board_id) VALUES (?, ?, ?, ?, ?)") { st in
             st.bind(1, accountID)
             st.bind(2, name)
             st.bind(3, projectKey)
             if let jql { st.bind(4, jql) } else { st.bindNull(4) }
+            if let boardID { st.bind(5, Int64(boardID)) } else { st.bindNull(5) }
         }
         let id = db.lastInsertRowID
         jiraSpaces = try db.query("SELECT * FROM jira_spaces ORDER BY id", map: Self.space(from:))

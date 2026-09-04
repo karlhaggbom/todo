@@ -110,6 +110,9 @@ public struct RootView: View {
                 CreateGitHubIssueSheet(account: account, board: board)
             }
         }
+        .sheet(item: $model.deleteTarget) { target in
+            ConfirmDeleteSheet(target: target)
+        }
         .onAppear { reloadJiraTokens(); reloadGitHubTokens() }
         .onReceive(store.$jiraAccounts) { _ in reloadJiraTokens() }
         .onReceive(store.$githubAccounts) { _ in reloadGitHubTokens() }
@@ -194,6 +197,10 @@ public struct RootView: View {
                 }
                 if model.createTarget != nil {
                     model.createTarget = nil
+                    return nil
+                }
+                if model.deleteTarget != nil {
+                    model.deleteTarget = nil
                     return nil
                 }
                 if showAddAccount {

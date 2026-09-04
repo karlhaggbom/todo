@@ -40,6 +40,9 @@ final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
 
     /// Active board filter (synced from AppModel.filterText by the view).
     @Published var filterText: String = ""
+    /// "My tickets only": pre-selected; filters each lane to issues assigned
+    /// to the account's login. Client-side, so toggling is instant.
+    @Published var mineOnly = true
 
     private var cacheKey: String { "github-board-\(repo.id)" }
 
@@ -57,16 +60,35 @@ final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
 
     @MainActor
     func load() async {
-        Diag.log.info("github load start repo=\(self.repo.owner)/\(self.repo.repo, privacy: .public)")
+        await load(force: false)
+    }
+
+    /// The refresh button forces past the cache-freshness shortcut.
+    @MainActor
+    func refresh() async {
+        await load(force: true)
+    }
+
+    @MainActor
+    func load(force: Bool = false) async {
+        Diag.log.info("github load start repo=\(self.repo.owner)/\(self.repo.repo, privacy: .public) force=\(force, privacy: .public)")
         // Cache-first: publish the last successful fetch immediately so the
         // board is usable while the network request is in flight.
+        var cacheIsFresh = false
         if issues.isEmpty, let cache,
            let entry = cache.cachedData(for: cacheKey),
            let snapshot = try? JSONDecoder().decode(CachedGitHubBoard.self, from: entry.data) {
             issues = snapshot.issues
             lastUpdated = entry.fetchedAt
             showingCached = true
-            Diag.log.info("github published cached snapshot issues=\(snapshot.issues.count, privacy: .public)")
+            cacheIsFresh = Date().timeIntervalSince(entry.fetchedAt) < 60
+            Diag.log.info("github published cached snapshot issues=\(snapshot.issues.count, privacy: .public) fresh=\(cacheIsFresh, privacy: .public)")
+        }
+        // Cache is under a minute old: skip the network round-trip.
+        if !force, cacheIsFresh {
+            Diag.log.info("github load skipped: cache < 60s old")
+            isLoading = false
+            return
         }
         isLoading = true
         lastError = nil
@@ -89,47 +111,58 @@ final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
         isLoading = false
     }
 
-    func refresh() async {
-        await load()
-    }
-
     // MARK: Board structure
 
     func issues(inLane laneID: String) -> [GitHubIssue] {
         let base = issues.filter { $0.laneID == laneID }
+        let scoped = mineOnly
+            ? base.filter { ($0.assignees ?? []).contains { $0.login == account.login } }
+            : base
         let f = filterText
-        guard !f.isEmpty else { return base }
+        guard !f.isEmpty else { return scoped }
         let int = Int(f)
-        return base.filter {
+        return scoped.filter {
             $0.title.localizedCaseInsensitiveContains(f) ||
             (int != nil && $0.number == int)
         }
     }
 
-    /// Transition an issue to another lane (open / completed / not planned)
-    /// and optimistically update local state.
+    /// Transition an issue to another lane (open / completed / not
+    /// planned). Optimistic: the card flips lane instantly, the server
+    /// response replaces it on success, and the move reverts on failure.
     @MainActor
     func transition(issueNumber: Int, toLane laneID: String) async -> Bool {
+        let state: String
+        let stateReason: String?
+        switch laneID {
+        case GitHubLane.completed.id:
+            state = "closed"; stateReason = "completed"
+        case GitHubLane.notPlanned.id:
+            state = "closed"; stateReason = "not_planned"
+        default:
+            state = "open"; stateReason = nil
+        }
+        guard let idx = issues.firstIndex(where: { $0.number == issueNumber }) else { return false }
+        let previous = issues[idx]
+        issues[idx] = GitHubIssue(
+            number: previous.number, title: previous.title, body: previous.body,
+            state: state, stateReason: stateReason, htmlURL: previous.htmlURL,
+            updatedAt: previous.updatedAt, labels: previous.labels,
+            assignees: previous.assignees, pullRequest: previous.pullRequest
+        )
         do {
-            let state: String
-            let stateReason: String?
-            switch laneID {
-            case GitHubLane.completed.id:
-                state = "closed"; stateReason = "completed"
-            case GitHubLane.notPlanned.id:
-                state = "closed"; stateReason = "not_planned"
-            default:
-                state = "open"; stateReason = nil
-            }
             let updated = try await client.patchIssue(
                 owner: repo.owner, repo: repo.repo, number: issueNumber,
                 state: state, stateReason: stateReason
             )
-            if let idx = issues.firstIndex(where: { $0.number == issueNumber }) {
-                issues[idx] = updated
+            if let i = issues.firstIndex(where: { $0.number == issueNumber }) {
+                issues[i] = updated
             }
             return true
         } catch {
+            if let i = issues.firstIndex(where: { $0.number == issueNumber }) {
+                issues[i] = previous
+            }
             lastError = error.localizedDescription
             return false
         }

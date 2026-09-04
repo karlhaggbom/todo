@@ -18,8 +18,10 @@ struct CreateIssueSheet: View {
     @State private var assigneeID: String?
     @State private var priorities: [JiraClient.JiraPriority] = []
     @State private var priorityID: String?
-    @State private var sprint: JiraClient.JiraSprintsPage.Sprint?
     @State private var useSprint = false
+    @State private var boards: [JiraClient.JiraBoardsPage.Board] = []
+    @State private var sprintsByBoard: [Int: JiraClient.JiraSprintsPage.Sprint?] = [:]
+    @State private var selectedBoardID: Int?
     @State private var resolvedProjectKey: String?
     @State private var loadingMeta = false
     @State private var errorBanner: String?
@@ -74,16 +76,33 @@ struct CreateIssueSheet: View {
                     .labelsHidden()
                 }
                 GridRow {
+                    Text("Board").font(.system(size: 12)).foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        if loadingMeta && boards.isEmpty {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Picker("Board", selection: $selectedBoardID) {
+                            ForEach(boards, id: \.id) { b in
+                                Text(b.name).tag(Int?.some(b.id))
+                            }
+                        }
+                        .labelsHidden()
+                        .onChange(of: selectedBoardID) { _, _ in
+                            useSprint = selectedSprint != nil
+                        }
+                    }
+                }
+                GridRow {
                     Text("Sprint").font(.system(size: 12)).foregroundStyle(.secondary)
                     HStack(spacing: 8) {
                         Toggle("", isOn: $useSprint)
                             .toggleStyle(.checkbox)
                             .labelsHidden()
-                            .disabled(sprint == nil)
-                        if let sprint {
-                            Text(sprint.name)
+                            .disabled(selectedSprint == nil)
+                        if let selectedSprint {
+                            Text(selectedSprint.name)
                                 .font(.system(size: 12))
-                                .foregroundStyle(sprint == nil ? .tertiary : .secondary)
+                                .foregroundStyle(.secondary)
                         } else if loadingMeta {
                             ProgressView().controlSize(.mini)
                         } else {
@@ -121,6 +140,11 @@ struct CreateIssueSheet: View {
         .task { await loadMeta() }
     }
 
+    private var selectedSprint: JiraClient.JiraSprintsPage.Sprint? {
+        guard let id = selectedBoardID, let s = sprintsByBoard[id] else { return nil }
+        return s
+    }
+
     private func loadMeta() async {
         loadingMeta = true
         do {
@@ -131,16 +155,35 @@ struct CreateIssueSheet: View {
                 ?? board.space.projectKey
             resolvedProjectKey = key
             Diag.log.info("create-issue resolved project=\(key, privacy: .public)")
-            // Fetch priorities, assignable users and the active sprint in
+            // Fetch priorities, assignable users and the boards in
             // parallel; failures degrade to defaults rather than blocking.
             async let prioritiesTask = board.client.priorities()
             async let usersTask = board.client.assignableUsers(projectKey: key)
-            async let sprintTask = board.client.activeSprint(projectKey: key)
-            let (p, u, s) = try await (prioritiesTask, usersTask, sprintTask)
+            async let boardsTask = board.client.boards(projectKey: key)
+            let (p, u, b) = try await (prioritiesTask, usersTask, boardsTask)
             priorities = p
             users = u
-            sprint = s
-            useSprint = s != nil
+            boards = b
+            // Probe every board for an active sprint (Kanban boards simply
+            // report none). Done concurrently — it's one request per board.
+            var byBoard: [Int: JiraClient.JiraSprintsPage.Sprint?] = [:]
+            try await withThrowingTaskGroup(of: (Int, JiraClient.JiraSprintsPage.Sprint?).self) { group in
+                for b in b {
+                    group.addTask {
+                        (b.id, try await self.board.client.activeSprint(boardID: b.id))
+                    }
+                }
+                for try await (id, s) in group { byBoard[id] = s }
+            }
+            sprintsByBoard = byBoard
+            // Pre-select the board pinned to the space — issues created here
+            // land on it (and its sprint via the onChange below); fall back
+            // to the first board with a running sprint, else the first.
+            let pinned = board.space.boardID
+            selectedBoardID = b.first(where: { $0.id == pinned })?.id
+                ?? b.first(where: { byBoard[$0.id] != nil })?.id
+                ?? b.first?.id
+            useSprint = selectedSprint != nil
             priorityID = p.first { $0.name.lowercased() == "medium" }?.id ?? p.first?.id
         } catch {
             Diag.log.error("create-issue meta failed: \(error.localizedDescription, privacy: .public)")
@@ -165,11 +208,12 @@ struct CreateIssueSheet: View {
         do {
             let created = try await board.client.createIssue(fields: fields)
             // Sprint membership can't be set at creation time in the REST
-            // API — move the new issue into the active sprint separately.
-            // Failure here shouldn't fail the (successful) creation.
-            if useSprint, let sprint {
+            // API — move the new issue into the selected board's active
+            // sprint separately. Failure here shouldn't fail the (successful)
+            // creation.
+            if useSprint, let selectedSprint {
                 do {
-                    try await board.client.addIssueToSprint(sprintID: sprint.id, issueKey: created.key)
+                    try await board.client.addIssueToSprint(sprintID: selectedSprint.id, issueKey: created.key)
                 } catch {
                     Diag.log.error("add-to-sprint failed: \(error.localizedDescription, privacy: .public)")
                 }
@@ -297,5 +341,62 @@ struct CreateGitHubIssueSheet: View {
             Diag.log.error("github create-issue failed: \(error.localizedDescription, privacy: .public)")
             errorBanner = "Couldn't create issue: \(error.localizedDescription)"
         }
+    }
+}
+// MARK: - Delete confirmation
+
+/// Small confirmation sheet for `d d` and context-menu deletes. Jira
+/// deletions are permanent — one explicit confirm, then it's gone. Enter
+/// confirms, Esc cancels.
+struct ConfirmDeleteSheet: View {
+    @EnvironmentObject var store: TodoStore
+    @Environment(\.dismiss) private var dismiss
+
+    let target: DeleteTarget
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(heading)
+                .font(.system(size: 15, weight: .semibold))
+            Text(subline)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Delete", role: .destructive) {
+                    perform()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 380)
+    }
+
+    private var heading: String {
+        switch target.content {
+        case .localTask(let task): return "Delete “\(task.title)”?"
+        case .jiraIssue(_, _, let issue): return "Delete \(issue.key)?"
+        }
+    }
+
+    private var subline: String {
+        switch target.content {
+        case .localTask:
+            return "The task will be removed from the board. This can’t be undone."
+        case .jiraIssue(_, _, let issue):
+            return "“\(issue.fields.summary)” will be permanently deleted from Jira. This can’t be undone."
+        }
+    }
+
+    private func perform() {
+        switch target.content {
+        case .localTask(let task):
+            try? store.deleteTask(task.id)
+        case .jiraIssue(_, let board, let issue):
+            Task { await board.deleteIssue(issueKey: issue.key) }
+        }
+        dismiss()
     }
 }

@@ -116,6 +116,7 @@ final class JiraClient {
             let description: ADFDocument?
             let status: Status
             let issuetype: IssueType
+            let assignee: Assignee?
             let updated: String?
             struct Status: Decodable {
                 let name: String
@@ -127,13 +128,21 @@ final class JiraClient {
                 let iconURL: String?
                 enum CodingKeys: String, CodingKey { case name; case iconURL = "iconUrl" }
             }
+            struct Assignee: Decodable {
+                let displayName: String?
+                let accountID: String?
+                enum CodingKeys: String, CodingKey {
+                    case displayName
+                    case accountID = "accountId"
+                }
+            }
         }
         let issues: [ResultIssue]?
         let nextPageToken: String?
         let total: Int?
     }
 
-    func search(jql: String, maxResults: Int = 100, fields: [String] = ["summary", "description", "status", "issuetype", "updated"]) async throws -> SearchResponse {
+    func search(jql: String, maxResults: Int = 100, fields: [String] = ["summary", "description", "status", "issuetype", "assignee", "updated"]) async throws -> SearchResponse {
         let body = try jsonBody(SearchRequest(jql: jql, maxResults: maxResults, fields: fields, nextPageToken: nil))
         let req = try request("POST", "/rest/api/3/search/jql", body: body)
         return try await send(req, as: SearchResponse.self)
@@ -306,19 +315,18 @@ final class JiraClient {
         let values: [Sprint]
     }
 
-    /// The sprint currently active in any board of the project, if one is
-    /// running. Used to pre-select the sprint when creating an issue.
-    /// Kanban-style boards answer 400 "does not support sprints" — they're
-    /// skipped, not fatal.
-    func activeSprint(projectKey: String) async throws -> JiraSprintsPage.Sprint? {
+    func boards(projectKey: String) async throws -> [JiraBoardsPage.Board] {
         let req = try request("GET", "/rest/agile/1.0/board?projectKeyOrId=\(projectKey)")
-        let boards = try await send(req, as: JiraBoardsPage.self).values
-        for board in boards {
-            let sprintReq = try request("GET", "/rest/agile/1.0/board/\(board.id)/sprint?state=active")
-            guard let page = try? await send(sprintReq, as: JiraSprintsPage.self) else { continue }
-            if let sprint = page.values.first { return sprint }
-        }
-        return nil
+        return try await send(req, as: JiraBoardsPage.self).values
+    }
+
+    /// The sprint currently active on a board, if one is running. Kanban
+    /// boards answer 400 "does not support sprints" — reported as no
+    /// sprint rather than an error.
+    func activeSprint(boardID: Int) async throws -> JiraSprintsPage.Sprint? {
+        let req = try request("GET", "/rest/agile/1.0/board/\(boardID)/sprint?state=active")
+        guard let page = try? await send(req, as: JiraSprintsPage.self) else { return nil }
+        return page.values.first
     }
 
     struct JiraCreateFields: Encodable {
@@ -331,6 +339,16 @@ final class JiraClient {
     }
 
     struct JiraCreateResponse: Codable { let id: String; let key: String }
+
+    /// Permanently delete an issue. Status-code-only: a 2xx means gone.
+    func deleteIssue(key: String) async throws {
+        let req = try request("DELETE", "/rest/api/3/issue/\(key)")
+        let (_, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw JiraError.http(code, "delete failed")
+        }
+    }
 
     func createIssue(fields: JiraCreateFields) async throws -> JiraCreateResponse {
         struct CreateBody: Encodable { let fields: JiraCreateFields }

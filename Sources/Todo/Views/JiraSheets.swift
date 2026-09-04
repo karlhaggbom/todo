@@ -226,6 +226,15 @@ struct AddSpaceSheet: View {
     @State private var projectKey = ""
     @State private var spaceName = ""
     @State private var jql = ""
+    @State private var boards: [JiraClient.JiraBoardsPage.Board]?
+    @State private var selectedBoardID: Int?
+    @State private var resolvedKey: String?
+    @State private var loadingBoards = false
+    @State private var errorBanner: String?
+
+    /// The project key that actually owns the issues — resolved from the
+    /// project's own issues when possible, else what the user typed.
+    private var key: String { resolvedKey ?? projectKey }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -235,6 +244,7 @@ struct AddSpaceSheet: View {
                 GridRow {
                     Text("Project key").font(.system(size: 12)).foregroundStyle(.secondary)
                     TextField("TODO", text: $projectKey).textFieldStyle(.roundedBorder)
+                        .disabled(boards != nil)
                 }
                 GridRow {
                     Text("Space name").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -244,24 +254,93 @@ struct AddSpaceSheet: View {
                     Text("Custom JQL").font(.system(size: 12)).foregroundStyle(.secondary)
                     TextField("optional", text: $jql).textFieldStyle(.roundedBorder)
                 }
+                if let boards {
+                    GridRow {
+                        Text("Board").font(.system(size: 12)).foregroundStyle(.secondary)
+                        if boards.isEmpty {
+                            Text("No boards found — a space needs a board so new issues land on it")
+                                .font(.system(size: 12)).foregroundStyle(.tertiary)
+                        } else {
+                            Picker("Board", selection: $selectedBoardID) {
+                                ForEach(boards, id: \.id) { b in
+                                    Text(b.name).tag(Int?.some(b.id))
+                                }
+                            }
+                            .labelsHidden()
+                        }
+                    }
+                }
+            }
+            if let errorBanner {
+                Text(errorBanner)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
             }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Add") {
-                    _ = try? store.addJiraSpace(
-                        accountID: account.id,
-                        name: spaceName.isEmpty ? projectKey : spaceName,
-                        projectKey: projectKey,
-                        jql: jql.isEmpty ? nil : jql
-                    )
-                    dismiss()
+                if boards == nil {
+                    Button("Find Boards") { Task { await findBoards() } }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(projectKey.trimmingCharacters(in: .whitespaces).isEmpty || loadingBoards)
+                    if loadingBoards {
+                        ProgressView().controlSize(.small)
+                    }
+                } else {
+                    Button("Add") { save() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(selectedBoardID == nil)
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(projectKey.isEmpty)
             }
         }
         .padding(18)
         .frame(width: 400)
+    }
+
+    /// Two-phase add: first resolve the project (and its real key) and list
+    /// its agile boards; the space is then saved with one of them pinned, so
+    /// issues created from the space default to that board and its sprint.
+    private func findBoards() async {
+        loadingBoards = true
+        errorBanner = nil
+        let typed = projectKey.trimmingCharacters(in: .whitespaces)
+        guard let token = try? KeychainStore.token(forAccountID: account.id), !token.isEmpty else {
+            errorBanner = "Missing API token for \(account.name) in Keychain"
+            loadingBoards = false
+            return
+        }
+        let client = JiraClient(credentials: .init(
+            baseURL: account.baseURL, email: account.email, apiToken: token
+        ))
+        do {
+            async let boardsTask = client.boards(projectKey: typed)
+            // A stale or aliased key still lists boards via agile, but the
+            // search API tells us the key the issues actually carry.
+            async let resolvedTask = try? client.boardProjectKey(
+                jql: "project = \"\(typed)\" ORDER BY updated DESC")
+            let (found, resolved) = try await (boardsTask, resolvedTask)
+            resolvedKey = resolved ?? typed
+            boards = found
+            selectedBoardID = found.count == 1 ? found[0].id : nil
+            Diag.log.info("add-space boards=\(found.count) resolvedKey=\(resolved ?? "nil", privacy: .public)")
+            if found.isEmpty {
+                errorBanner = "No boards found for project \(resolvedKey ?? typed)"
+            }
+        } catch {
+            errorBanner = "Couldn't load boards: \(error.localizedDescription)"
+        }
+        loadingBoards = false
+    }
+
+    private func save() {
+        guard let boardID = selectedBoardID else { return }
+        _ = try? store.addJiraSpace(
+            accountID: account.id,
+            name: spaceName.isEmpty ? key : spaceName,
+            projectKey: key,
+            jql: jql.isEmpty ? nil : jql,
+            boardID: boardID
+        )
+        dismiss()
     }
 }

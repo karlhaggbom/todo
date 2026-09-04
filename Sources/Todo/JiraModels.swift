@@ -49,9 +49,31 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
 
     @MainActor
     func load() async {
-        Diag.log.info("load start project=\(self.space.projectKey, privacy: .public)")
+        await load(force: false)
+    }
+
+    /// The refresh button forces past the cache-freshness shortcut.
+    @MainActor
+    func refresh() async {
+        await load(force: true)
+    }
+
+    @MainActor
+    func load(force: Bool = false) async {
+        Diag.log.info("load start project=\(self.space.projectKey, privacy: .public) force=\(force, privacy: .public)")
+        // "My tickets only" needs the logged-in user's account id — fetch it
+        // in the background so it never delays the cache publish or network
+        // fetch. Until it arrives the filter simply shows everything.
+        if mineOnly, myAccountID == nil {
+            Task { @MainActor in
+                if let me = try? await self.client.myself() {
+                    self.myAccountID = me.accountID
+                }
+            }
+        }
         // Cache-first: publish the last successful fetch immediately so the
         // board is usable while the network request is in flight.
+        var cacheIsFresh = false
         if issues.isEmpty, let cache,
            let entry = cache.cachedData(for: cacheKey),
            let snapshot = try? JSONDecoder().decode(CachedJiraBoard.self, from: entry.data) {
@@ -59,7 +81,14 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
             issues = snapshot.issues
             lastUpdated = entry.fetchedAt
             showingCached = true
-            Diag.log.info("load published cached snapshot issues=\(snapshot.issues.count, privacy: .public)")
+            cacheIsFresh = Date().timeIntervalSince(entry.fetchedAt) < 60
+            Diag.log.info("load published cached snapshot issues=\(snapshot.issues.count, privacy: .public) fresh=\(cacheIsFresh, privacy: .public)")
+        }
+        // Cache is under a minute old: skip the network round-trip.
+        if !force, cacheIsFresh {
+            Diag.log.info("load skipped: cache < 60s old")
+            isLoading = false
+            return
         }
         isLoading = true
         lastError = nil
@@ -80,7 +109,9 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
                             statusCategory: .init(key: issue.fields.status.statusCategory.key)
                         ),
                         issuetype: .init(name: issue.fields.issuetype.name, iconURL: issue.fields.issuetype.iconURL),
-                        assignee: nil,
+                        assignee: issue.fields.assignee.map {
+                            .init(displayName: $0.displayName, accountID: $0.accountID)
+                        },
                         priority: nil,
                         updated: issue.fields.updated
                     )
@@ -102,44 +133,65 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
         isLoading = false
     }
 
-    func refresh() async {
-        await load()
-    }
-
     // MARK: Board structure
+
+    /// Delete an issue on the server; removes it from the board only on
+    /// success (the confirmation sheet already guards accidents).
+    @MainActor
+    func deleteIssue(issueKey: String) async -> Bool {
+        do {
+            try await client.deleteIssue(key: issueKey)
+            issues.removeAll { $0.key == issueKey }
+            return true
+        } catch {
+            Diag.log.error("jira deleteIssue failed: \(error.localizedDescription, privacy: .public)")
+            lastError = "Couldn't delete \(issueKey): \(error.localizedDescription)"
+            return false
+        }
+    }
 
     /// Active board filter (synced from AppModel.filterText by the view).
     @Published var filterText: String = ""
+    /// "My tickets only": pre-selected; filters each lane to issues whose
+    /// assignee is the logged-in user. Client-side, so toggling is instant.
+    @Published var mineOnly = true
+    /// Account id of the logged-in user (fetched once on first load; nil
+    /// until then, which the filter treats as "don't filter yet").
+    @Published private(set) var myAccountID: String?
 
     func issues(inStatus statusName: String) -> [JiraIssue] {
         let base = issues.filter { $0.fields.status.name == statusName }
+        let scoped = mineOnly && myAccountID != nil
+            ? base.filter { $0.fields.assignee?.accountID == myAccountID }
+            : base
         let f = filterText
-        guard !f.isEmpty else { return base }
-        return base.filter {
+        guard !f.isEmpty else { return scoped }
+        return scoped.filter {
             $0.key.localizedCaseInsensitiveContains(f) ||
             $0.fields.summary.localizedCaseInsensitiveContains(f)
         }
     }
 
-    /// Move an issue to a status lane via a transition.
-    /// Transition an issue and optimistically update local state. All
-    /// @Published mutations happen on the main actor.
+    /// Move an issue to a status lane via a transition. Optimistic: the
+    /// card changes lane instantly and the server call follows; on failure
+    /// the move is reverted (server response is the truth, like comments).
+    /// All @Published mutations happen on the main actor.
     @MainActor
     func transition(issueKey: String, toStatus statusName: String) async -> Bool {
+        guard let idx = issues.firstIndex(where: { $0.key == issueKey }) else { return false }
+        let previous = issues[idx].fields.status
+        let match = statuses.first { $0.name == statusName }
+        issues[idx].fields.status.name = statusName
+        issues[idx].fields.status.statusCategory.key = match?.categoryKey ?? "indeterminate"
         do {
             try await client.transitionTo(key: issueKey, statusName: statusName)
-            // Optimistic local update, then refresh in background for truth.
-            if let idx = issues.firstIndex(where: { $0.key == issueKey }) {
-                let match = statuses.first { $0.name == statusName }
-                issues[idx].fields.status.name = statusName
-                issues[idx].fields.status.statusCategory.key = match?.categoryKey ?? "indeterminate"
-            }
-            await load()
             return true
         } catch let JiraError.ambiguousTransition(names) {
+            issues[idx].fields.status = previous
             lastError = "Ambiguous transition: \(names.joined(separator: " / ")) — use the detail view to pick one."
             return false
         } catch {
+            issues[idx].fields.status = previous
             lastError = error.localizedDescription
             return false
         }

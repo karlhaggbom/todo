@@ -23,6 +23,18 @@ struct CreateIssueTarget: Identifiable {
     let content: Content
 }
 
+/// Delete-confirmation target, presented from RootView. GitHub issues
+/// can't be deleted through the REST API (only closed — the existing lane
+/// transitions), so GitHub boards never produce a delete target.
+struct DeleteTarget: Identifiable {
+    enum Content {
+        case localTask(TodoTask)
+        case jiraIssue(account: JiraAccount, board: JiraBoardModel, issue: JiraIssue)
+    }
+    let id = UUID()
+    let content: Content
+}
+
 // MARK: - Keyboard navigation abstraction
 
 /// A surface that can be driven by Vimium-style keys.
@@ -40,13 +52,6 @@ protocol KeyboardNavigable: AnyObject {
     func navOpenDetail(lane: Int, item: Int)
     /// Rename the item at the cursor (inline edit).
     func navBeginRename(lane: Int, item: Int)
-    /// Delete the item at the cursor (`dd`). Returns true if a delete happened.
-    func navDelete(lane: Int, item: Int) -> Bool
-}
-
-extension KeyboardNavigable {
-    /// Surfaces that don't support delete (e.g. Jira boards) do nothing.
-    func navDelete(lane: Int, item: Int) -> Bool { false }
 }
 
 // MARK: - Keyboard event routing
@@ -134,9 +139,27 @@ public final class AppModel: ObservableObject {
 
     /// Create-issue sheet, presented from RootView.
     @Published var createTarget: CreateIssueTarget?
-    /// Set by the active board view (like `navigable`); the "c" key invokes it.
+    /// Delete-confirmation sheet, presented from RootView.
+    @Published var deleteTarget: DeleteTarget?
+    /// Set by the active board view (like `navigable`); the "n" key invokes it.
     /// nil on the local board (which already has quick-add via "n").
+    ///
+    /// Registration is owner-tagged: SwiftUI can fire the incoming board's
+    /// onAppear *before* the outgoing board's onDisappear, so a blind `= nil`
+    /// on disappear would erase the handler the new board just registered.
     var createIssueHandler: (() -> Void)? = nil
+    private var createIssueOwner: ObjectIdentifier? = nil
+
+    func registerCreateIssueHandler(owner: AnyObject, handler: @escaping () -> Void) {
+        createIssueOwner = ObjectIdentifier(owner)
+        createIssueHandler = handler
+    }
+
+    func clearCreateIssueHandler(owner: AnyObject) {
+        guard createIssueOwner == ObjectIdentifier(owner) else { return }
+        createIssueHandler = nil
+        createIssueOwner = nil
+    }
 
     /// The currently active navigable surface (local board or a Jira board).
     var navigable: (() -> KeyboardNavigable?)? = nil
@@ -227,9 +250,11 @@ public final class AppModel: ObservableObject {
                 newLaneFieldVisible.toggle()
             } else if let createIssueHandler {
                 // Jira/GitHub boards: the create-issue sheet.
+                Diag.log.info("n: create handler present")
                 createIssueHandler()
             } else {
                 // Local board: inline quick-add in the current lane.
+                Diag.log.info("n: no create handler, quick-add")
                 quickAddLane = quickAddLane == selectedLane ? nil : selectedLane
             }
         case "e":
@@ -262,11 +287,15 @@ public final class AppModel: ObservableObject {
 
     private func handleDeleteKey() -> Bool {
         if pendingDeleteKey {
-            // `dd` confirmed — delete the cursor item through the active surface.
+            // `dd` — ask for confirmation before deleting the cursor item;
+            // one stray sequence shouldn't lose a ticket.
             pendingDeleteKey = false
             deleteResetWorkItem?.cancel()
             if let nav = navigable?(), nav.navItemCount(lane: selectedLane) > selectedItem {
-                _ = nav.navDelete(lane: selectedLane, item: selectedItem)
+                let cursor = CursorPosition(lane: selectedLane, item: selectedItem)
+                if let content = resolveDetail?(cursor), let target = Self.deleteTarget(from: content) {
+                    deleteTarget = target
+                }
             }
             return true
         }
@@ -276,6 +305,18 @@ public final class AppModel: ObservableObject {
         deleteResetWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
         return true
+    }
+
+    /// Map a resolved detail target onto a deletable one (GitHub: none).
+    private static func deleteTarget(from content: DetailSheetContent) -> DeleteTarget? {
+        switch content {
+        case .localTask(let task):
+            return DeleteTarget(content: .localTask(task))
+        case .jiraTicket(let account, let board, let issue):
+            return DeleteTarget(content: .jiraIssue(account: account, board: board, issue: issue))
+        case .githubIssue:
+            return nil
+        }
     }
 
     // MARK: Cursor ops

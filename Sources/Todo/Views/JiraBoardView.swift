@@ -66,14 +66,12 @@ private struct JiraBoardContent: View {
                     DetailSheetContent.jiraTicket(account: account, board: model, issue: $0)
                 }
             }
-            appModel.createIssueHandler = { [weak model] in
-                if let model {
-                    appModel.createTarget = CreateIssueTarget(content: .jiraIssue(account: account, board: model))
-                }
+            appModel.registerCreateIssueHandler(owner: model) {
+                appModel.createTarget = CreateIssueTarget(content: .jiraIssue(account: account, board: model))
             }
         }
         .onDisappear {
-            appModel.createIssueHandler = nil
+            appModel.clearCreateIssueHandler(owner: model)
         }
         .onChange(of: appModel.filterText) { model.filterText = $0 }
     }
@@ -100,6 +98,10 @@ private struct JiraBoardContent: View {
                     .foregroundStyle(model.showingCached ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
             }
             Spacer()
+            Toggle("My tickets only", isOn: $model.mineOnly)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+                .help("Only show issues assigned to you")
             if model.isLoading {
                 ProgressView()
                     .controlSize(.small)
@@ -112,6 +114,7 @@ private struct JiraBoardContent: View {
             }
             .buttonStyle(.borderless)
             .help("New issue (n)")
+            .pointingHandOnHover()
             Button {
                 Task { await model.refresh() }
             } label: {
@@ -120,6 +123,7 @@ private struct JiraBoardContent: View {
             }
             .buttonStyle(.borderless)
             .help("Refresh")
+            .pointingHandOnHover()
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -194,6 +198,13 @@ private struct JiraBoardContent: View {
                                         appModel.detailTarget = CursorPosition(lane: laneIndex, item: index)
                                     }
                                 ))
+                                .contextMenu {
+                                    Button("Delete Issue…", role: .destructive) {
+                                        appModel.deleteTarget = DeleteTarget(
+                                            content: .jiraIssue(account: account, board: model, issue: issue)
+                                        )
+                                    }
+                                }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)

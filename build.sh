@@ -36,7 +36,14 @@ cat > "$CONTENTS/Info.plist" <<'EOF'
 </plist>
 EOF
 
-# Ad-hoc codesign so the app launches from Finder without Gatekeeper friction.
-codesign --force --sign - "$APP_DIR"
+# Sign with the stable local identity when present ("Todo Dev", created
+# once via openssl + `security import`; see README) so the Keychain sees
+# the same app every build — ad-hoc signatures change every build, which
+# makes the Keychain prompt for the login password on each token access.
+if security find-identity -v -p codesigning | grep -q '"Todo Dev"'; then
+    codesign --force --sign "Todo Dev" "$APP_DIR"
+else
+    codesign --force --sign - "$APP_DIR"
+fi
 
 echo "Built $APP_DIR"

@@ -13,7 +13,6 @@ import AppKit
     final class MockNavigable: KeyboardNavigable {
         let laneItems: [Int]
         var moveItemCalls: [(lane: Int, item: Int, toLaneDelta: Int, itemDelta: Int)] = []
-        var deleteCalls: [(lane: Int, item: Int)] = []
 
         init(laneItems: [Int]) { self.laneItems = laneItems }
 
@@ -28,10 +27,6 @@ import AppKit
         }
         func navOpenDetail(lane: Int, item: Int) {}
         func navBeginRename(lane: Int, item: Int) {}
-        func navDelete(lane: Int, item: Int) -> Bool {
-            deleteCalls.append((lane, item))
-            return true
-        }
     }
 
     private func makeModel(navigable: KeyboardNavigable) -> AppModel {
@@ -140,15 +135,15 @@ import AppKit
 
     // MARK: `dd` deletion
 
-    @Test func ddWithinTimeoutDeletesCursorItem() {
+    @Test func ddWithinTimeoutPresentsDeleteConfirmation() {
         let mock = MockNavigable(laneItems: [2])
         let model = makeModel(navigable: mock)
+        let task = TodoTask(id: 1, laneID: 1, title: "T", notes: "", position: 0, createdAt: Date(), completedAt: nil)
+        model.resolveDetail = { _ in .localTask(task) }
         #expect(model.handleKey(key("d")))
-        #expect(mock.deleteCalls.isEmpty, "single d must not delete yet")
+        #expect(model.deleteTarget == nil, "single d must not prompt yet")
         #expect(model.handleKey(key("d")))
-        #expect(mock.deleteCalls.count == 1, "second d within the window must delete")
-        #expect(mock.deleteCalls[0].lane == 0)
-        #expect(mock.deleteCalls[0].item == 0)
+        #expect(model.deleteTarget != nil, "second d within the window must prompt for confirmation")
     }
 
     @Test func dThenOtherKeyThenDDoesNotDelete() {
@@ -157,7 +152,7 @@ import AppKit
         model.handleKey(key("d"))
         model.handleKey(key("j")) // interrupts the sequence
         model.handleKey(key("d"))
-        #expect(mock.deleteCalls.isEmpty, "an interrupted dd must not delete")
+        #expect(model.deleteTarget == nil, "an interrupted dd must not prompt")
     }
 
     @Test func ddOnEmptyLaneDoesNotDelete() {
@@ -165,7 +160,7 @@ import AppKit
         let model = makeModel(navigable: mock)
         model.handleKey(key("d"))
         model.handleKey(key("d"))
-        #expect(mock.deleteCalls.isEmpty, "no cursor item means nothing to delete")
+        #expect(model.deleteTarget == nil, "no cursor item means nothing to delete")
     }
 
     @Test func surfaceWithoutDeleteSupportDoesNotDelete() {
@@ -180,7 +175,8 @@ import AppKit
         let model = makeModel(navigable: NoDelete())
         model.handleKey(key("d"))
         let consumed = model.handleKey(key("d"))
-        #expect(consumed, "dd on a Jira board is consumed but must be a no-op delete")
+        #expect(consumed, "dd on a surface without a resolvable item is consumed but does nothing")
+        #expect(model.deleteTarget == nil)
     }
 
     // MARK: Detail + toggles

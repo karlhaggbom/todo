@@ -59,14 +59,14 @@ private struct GitHubBoardContent: View {
                     DetailSheetContent.githubIssue(account: account, board: model, issue: $0)
                 }
             }
-            appModel.createIssueHandler = { [weak model] in
-                if let model {
-                    appModel.createTarget = CreateIssueTarget(content: .githubIssue(account: account, board: model))
-                }
+            appModel.registerCreateIssueHandler(owner: model) {
+                appModel.createTarget = CreateIssueTarget(content: .githubIssue(account: account, board: model))
             }
+            Diag.log.info("github create handler registered repo=\(repo.repo, privacy: .public)")
         }
         .onDisappear {
-            appModel.createIssueHandler = nil
+            appModel.clearCreateIssueHandler(owner: model)
+            Diag.log.info("github create handler cleared")
         }
         .onChange(of: appModel.filterText) { model.filterText = $0 }
     }
@@ -93,6 +93,10 @@ private struct GitHubBoardContent: View {
                     .foregroundStyle(model.showingCached ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
             }
             Spacer()
+            Toggle("My tickets only", isOn: $model.mineOnly)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+                .help("Only show issues assigned to you")
             if model.isLoading {
                 ProgressView()
                     .controlSize(.small)
@@ -105,6 +109,7 @@ private struct GitHubBoardContent: View {
             }
             .buttonStyle(.borderless)
             .help("New issue (n)")
+            .pointingHandOnHover()
             Button {
                 Task { await model.refresh() }
             } label: {
@@ -113,6 +118,7 @@ private struct GitHubBoardContent: View {
             }
             .buttonStyle(.borderless)
             .help("Refresh")
+            .pointingHandOnHover()
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)

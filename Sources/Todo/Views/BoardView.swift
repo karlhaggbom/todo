@@ -319,6 +319,11 @@ struct LaneView: View {
                             model.detailTarget = CursorPosition(lane: laneIndex, item: index)
                         }
                     ))
+                    .contextMenu {
+                        Button("Delete Task…", role: .destructive) {
+                            model.deleteTarget = DeleteTarget(content: .localTask(task))
+                        }
+                    }
             }
         }
     }
@@ -570,10 +575,38 @@ extension View {
     func cardHover() -> some View { modifier(CardHover()) }
 }
 
+/// Web-style pointing-hand cursor over clickable items. Hover-enter also
+/// re-renders cards (CardHover border), and AppKit's cursor-rect update
+/// after that render resets whatever `.set()` installed — so the cursor is
+/// re-asserted on every mouse move via onContinuousHover, and `.set()`
+/// (not push/pop) keeps a vanishing card from unbalancing the cursor stack.
+struct HoverPointingHand: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .onHover { hovering in
+                DispatchQueue.main.async {
+                    hovering ? NSCursor.pointingHand.set() : NSCursor.arrow.set()
+                }
+            }
+            .onContinuousHover { phase in
+                switch phase {
+                case .active: NSCursor.pointingHand.set()
+                case .ended: NSCursor.arrow.set()
+                }
+            }
+    }
+}
+
+extension View {
+    func pointingHandOnHover() -> some View { modifier(HoverPointingHand()) }
+}
+
 /// Single-click select + double-click detail with no disambiguation delay.
 /// SwiftUI's count-1/count-2 tap pair waits for the double-click window
 /// before firing the single tap, which makes mouse selection feel laggy.
 /// State is per card, so two fast clicks on different cards never collide.
+/// Cards are the board's primary clickable items, so they also get the
+/// pointing-hand cursor here.
 struct InstantTap: ViewModifier {
     let single: () -> Void
     let double: () -> Void
@@ -590,6 +623,7 @@ struct InstantTap: ViewModifier {
                 single()
             }
         }
+        .pointingHandOnHover()
     }
 }
 
@@ -631,6 +665,7 @@ struct HelpOverlay: View {
                 ("H/L, ⇧←/⇧→", "move issue to adjacent lane (Jira transition)"),
                 ("Enter", "issue detail"),
                 ("n", "new issue"),
+                ("d d", "delete issue"),
                 ("g g / G", "first / last issue"),
                 ("1-9", "jump to lane"),
                 ("⌘1-9", "jump to board"),

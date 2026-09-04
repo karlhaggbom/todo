@@ -136,6 +136,10 @@ final class SQLiteDatabase {
             guard sqlite3_column_type(handle, Int32(index)) != SQLITE_NULL else { return nil }
             return string(index)
         }
+        func optionalInt(_ index: Int) -> Int? {
+            guard sqlite3_column_type(handle, Int32(index)) != SQLITE_NULL else { return nil }
+            return Int(sqlite3_column_int64(handle, Int32(index)))
+        }
         func data(_ index: Int) -> Data? {
             guard let blob = sqlite3_column_blob(handle, Int32(index)) else { return nil }
             let count = Int(sqlite3_column_bytes(handle, Int32(index)))
@@ -147,6 +151,7 @@ final class SQLiteDatabase {
         func double(_ name: String) -> Double { double(indices[name] ?? 0) }
         func string(_ name: String) -> String { string(indices[name] ?? 0) }
         func optionalString(_ name: String) -> String? { optionalString(indices[name] ?? 0) }
+        func optionalInt(_ name: String) -> Int? { optionalInt(indices[name] ?? 0) }
         func data(_ name: String) -> Data? { data(indices[name] ?? 0) }
         func bool(_ name: String) -> Bool { bool(indices[name] ?? 0) }
 

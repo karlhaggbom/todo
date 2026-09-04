@@ -33,6 +33,7 @@ struct JiraSpace: Identifiable, Codable, Equatable, Hashable {
     var name: String     // display name
     var projectKey: String
     var jql: String?     // optional custom JQL; nil = project = KEY
+    var boardID: Int?    // pinned agile board — created issues are put onto it
 }
 
 // MARK: - Jira API response models
@@ -84,6 +85,11 @@ struct JiraIssue: Codable, Identifiable, Hashable {
         }
         struct Assignee: Codable, Hashable {
             var displayName: String?
+            var accountID: String?
+            enum CodingKeys: String, CodingKey {
+                case displayName
+                case accountID = "accountId"
+            }
         }
         struct Priority: Codable, Hashable {
             var name: String?
@@ -324,13 +330,15 @@ struct GitHubIssue: Codable, Identifiable, Hashable {
     let htmlURL: String?
     let updatedAt: String
     let labels: [GitHubLabel]
+    /// Users assigned to the issue ("my tickets only" filters on this).
+    let assignees: [GitHubUser]?
     /// Present (non-nil) when the item is actually a pull request.
     let pullRequest: GitHubPullRequestMarker?
 
     var id: Int { number }
 
     enum CodingKeys: String, CodingKey {
-        case number, title, body, state, labels
+        case number, title, body, state, labels, assignees
         case stateReason = "state_reason"
         case htmlURL = "html_url"
         case updatedAt = "updated_at"

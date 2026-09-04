@@ -292,6 +292,62 @@ import Foundation
 
     // MARK: Jira persistence
 
+    @Test func addJiraSpacePinsBoardAndSurvivesReopen() throws {
+        let path = "\(NSTemporaryDirectory())/todo-store-pinboard-\(UUID().uuidString).sqlite3"
+        let service = "todo.tests.\(UUID().uuidString)"
+        let store = TodoStore(databasePath: path, keychainService: service)
+        let account = try store.addJiraAccount(
+            name: "Work", email: "me@example.com",
+            baseURL: "https://example.atlassian.net", apiToken: "tok-pin"
+        )
+
+        let space = try store.addJiraSpace(
+            accountID: account.id, name: "Team", projectKey: "TEAM",
+            jql: nil, boardID: 42
+        )
+        #expect(space.boardID == 42)
+        #expect(store.jiraSpaces.first?.boardID == 42)
+
+        // Survives reopen: the pinned board is on disk.
+        let reopened = TodoStore(databasePath: path, keychainService: service)
+        #expect(reopened.jiraSpaces.first?.boardID == 42, "pinned board must persist")
+    }
+
+    @Test func migrateAddsBoardIDColumnToLegacySpaceTable() throws {
+        let path = "\(NSTemporaryDirectory())/todo-store-migrateboard-\(UUID().uuidString).sqlite3"
+        // A database from before spaces carried a pinned board.
+        let legacy = try SQLiteDatabase(path: path)
+        try legacy.execute("""
+        CREATE TABLE jira_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            base_url TEXT NOT NULL
+        );
+        CREATE TABLE jira_spaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES jira_accounts(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            jql TEXT
+        );
+        """)
+        try legacy.run("INSERT INTO jira_accounts (name, email, base_url) VALUES ('Work', 'me@example.com', 'https://example.atlassian.net')") { _ in }
+        try legacy.run("INSERT INTO jira_spaces (account_id, name, project_key, jql) VALUES (1, 'Team', 'TEAM', NULL)") { _ in }
+
+        // Opening the store migrates the table in place.
+        let store = TodoStore(databasePath: path, keychainService: "todo.tests.\(UUID().uuidString)")
+        #expect(store.jiraSpaces.first?.boardID == nil, "legacy spaces have no pinned board")
+        #expect(store.jiraSpaces.first?.projectKey == "TEAM", "legacy rows must survive the migration")
+
+        // The new column is usable immediately.
+        let account = try #require(store.jiraAccounts.first)
+        let space = try store.addJiraSpace(
+            accountID: account.id, name: "New", projectKey: "NEW", jql: nil, boardID: 7
+        )
+        #expect(space.boardID == 7)
+    }
+
     @Test func addJiraAccountAndSpacePersistAndTokenRoundTrips() throws {
         let store = makeStore()
         let account = try store.addJiraAccount(

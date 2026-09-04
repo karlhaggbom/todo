@@ -191,15 +191,4 @@ final class LocalBoardModel: KeyboardNavigable {
               filteredTasks(inLane: store.lanes[lane].id).indices.contains(item) else { return }
         model.renameTarget = CursorPosition(lane: lane, item: item)
     }
-
-    /// Delete the task under the cursor (`dd`). Returns false when the
-    /// cursor sits on a filtered-out or missing item.
-    func navDelete(lane: Int, item: Int) -> Bool {
-        guard store.lanes.indices.contains(lane) else { return false }
-        let laneID = store.lanes[lane].id
-        let visible = filteredTasks(inLane: laneID)
-        guard visible.indices.contains(item) else { return false }
-        _ = try? store.deleteTask(visible[item].id)
-        return true
-    }
 }
