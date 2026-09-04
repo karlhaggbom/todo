@@ -8,6 +8,9 @@ public struct RootView: View {
     @EnvironmentObject var model: AppModel
 
     @State private var monitor: Any?
+    /// Left-click monitor: a click on the main window behind an open sheet
+    /// dismisses the sheet (background-click dismissal).
+    @State private var mouseMonitor: Any?
     @State private var showAddAccount = false
     @State private var addSpaceAccount: JiraAccount?
     @State private var showAddGitHubAccount = false
@@ -30,6 +33,8 @@ public struct RootView: View {
 
     // Local board keyboard adapter.
     @State private var localBoard: LocalBoardModel?
+    /// Background mention polling (5 min) for the sidebar unread badges.
+    @StateObject private var mentionsTracker = MentionsTracker()
 
     public var body: some View {
         NavigationSplitView {
@@ -47,6 +52,13 @@ public struct RootView: View {
                 model.navigable = { [weak board] in board }
             }
             installKeyMonitor()
+            installMouseMonitor()
+            // The window exists by the first runloop turn after appear.
+            DispatchQueue.main.async {
+                if model.mainWindow == nil {
+                    model.mainWindow = NSApp.keyWindow
+                }
+            }
             Diag.startProbe()
             Diag.observeMoves()
             Diag.log.info("RootView appeared, spaces=\(store.jiraSpaces.count)")
@@ -79,6 +91,10 @@ public struct RootView: View {
             if let monitor {
                 NSEvent.removeMonitor(monitor)
                 self.monitor = nil
+            }
+            if let mouseMonitor {
+                NSEvent.removeMonitor(mouseMonitor)
+                self.mouseMonitor = nil
             }
         }
         .sheet(isPresented: $showAddAccount) {
@@ -127,6 +143,17 @@ public struct RootView: View {
         .onAppear { reloadJiraTokens(); reloadGitHubTokens() }
         .onReceive(store.$jiraAccounts) { _ in reloadJiraTokens() }
         .onReceive(store.$githubAccounts) { _ in reloadGitHubTokens() }
+        // Refresh mention badges at launch, then every 5 minutes. The
+        // models' cache logic keeps repeated ticks cheap (< 60s-old
+        // snapshots skip the network entirely).
+        .task {
+            while !Task.isCancelled {
+                await mentionsTracker.tick(
+                    store: store, jiraTokens: jiraTokens, githubTokens: githubTokens
+                )
+                try? await Task.sleep(for: .seconds(300))
+            }
+        }
     }
 
     public init() {}
@@ -175,6 +202,40 @@ public struct RootView: View {
         githubTokens = tokens
     }
 
+    // MARK: Modal dismissal
+
+    /// Close the top-most open sheet, one press/click = one concern.
+    /// Shared by the Esc handler and background-click dismissal so both
+    /// always agree on what's "on top". Returns true if something was open.
+    @discardableResult
+    private func dismissTopModal() -> Bool {
+        if model.detailTarget != nil { model.detailTarget = nil; return true }
+        if model.issueDetailTarget != nil { model.issueDetailTarget = nil; return true }
+        if model.createTarget != nil { model.createTarget = nil; return true }
+        if model.editTarget != nil { model.editTarget = nil; return true }
+        if model.deleteTarget != nil { model.deleteTarget = nil; return true }
+        if showAddAccount { showAddAccount = false; return true }
+        if addSpaceAccount != nil { addSpaceAccount = nil; return true }
+        if showAddGitHubAccount { showAddGitHubAccount = false; return true }
+        if addRepoAccount != nil { addRepoAccount = nil; return true }
+        return false
+    }
+
+    /// Clicking the main window's background while a sheet is up dismisses
+    /// the sheet — mirroring the Esc chain exactly. The sheet (and menus,
+    /// popovers) live in their own NSWindows, so comparing event windows
+    /// isolates genuine "behind the modal" clicks. The click is swallowed
+    /// so it doesn't also act on the board behind the dismissal.
+    private func installMouseMonitor() {
+        guard mouseMonitor == nil else { return }
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            if event.window === model.mainWindow, dismissTopModal() {
+                return nil
+            }
+            return event
+        }
+    }
+
     // MARK: Keyboard monitor
 
     /// Sidebar boards in jump order for ⌘1-9: Local Board, then each
@@ -201,43 +262,9 @@ public struct RootView: View {
             // Esc closes the open sheet first; board-state clearing only
             // applies when no sheet is up.
             if event.charactersIgnoringModifiers == "\u{1b}",
-               !(event.window?.firstResponder is NSTextView) {
-                if model.detailTarget != nil {
-                    model.detailTarget = nil
-                    return nil
-                }
-                if model.issueDetailTarget != nil {
-                    model.issueDetailTarget = nil
-                    return nil
-                }
-                if model.createTarget != nil {
-                    model.createTarget = nil
-                    return nil
-                }
-                if model.editTarget != nil {
-                    model.editTarget = nil
-                    return nil
-                }
-                if model.deleteTarget != nil {
-                    model.deleteTarget = nil
-                    return nil
-                }
-                if showAddAccount {
-                    showAddAccount = false
-                    return nil
-                }
-                if addSpaceAccount != nil {
-                    addSpaceAccount = nil
-                    return nil
-                }
-                if showAddGitHubAccount {
-                    showAddGitHubAccount = false
-                    return nil
-                }
-                if addRepoAccount != nil {
-                    addRepoAccount = nil
-                    return nil
-                }
+               !(event.window?.firstResponder is NSTextView),
+               dismissTopModal() {
+                return nil
             }
             // ⌘1-9 jumps to boards in sidebar order (⌘1 = Local Board).
             if event.modifierFlags.contains(.command),
@@ -346,7 +373,7 @@ public struct RootView: View {
                         }
                     }
             }
-            Label("Mentions", systemImage: "person.crop.circle.badge.exclamationmark")
+            mentionsRow(unread: githubUnreadCount(account.id))
                 .tag(SidebarSection.githubMentions(account.id))
             Button {
                 addRepoAccount = account
@@ -355,7 +382,15 @@ public struct RootView: View {
             }
             .buttonStyle(.plain)
         } label: {
-            Label(account.name, systemImage: "globe")
+            HStack(spacing: 6) {
+                Label(account.name, systemImage: "globe")
+                // Collapsed with unread mentions: red dot so "something
+                // happened" is visible without expanding. When expanded,
+                // the Mentions row badge carries the count instead.
+                if !expandedGitHubAccounts.contains(account.id), githubUnreadCount(account.id) > 0 {
+                    Circle().fill(.red).frame(width: 7, height: 7)
+                }
+            }
                 .contextMenu {
                     Button("Delete Account") {
                         _ = try? store.deleteGitHubAccount(account.id)
@@ -374,6 +409,38 @@ public struct RootView: View {
                 }
         }
         .id("github-account-\(account.id)")
+    }
+
+    /// Unread mentions for a Jira account: raw mention keys minus the
+    /// (published) read set, computed at render time so opening a mention
+    /// updates the badge instantly. 0 hides the badge.
+    private func jiraUnreadCount(_ accountID: Int64) -> Int {
+        mentionsTracker.jiraMentionKeys[accountID]?
+            .subtracting(store.readIssueKeys).count ?? 0
+    }
+
+    private func githubUnreadCount(_ accountID: Int64) -> Int {
+        mentionsTracker.githubMentionKeys[accountID]?
+            .subtracting(store.readIssueKeys).count ?? 0
+    }
+
+    /// Sidebar "Mentions" row with a trailing unread badge. Hand-rolled
+    /// instead of `.badge()`: on macOS, badge modifiers inside sidebar
+    /// List rows break the row's click-through (the row stops selecting
+    /// once a badge is attached), and plain row content does not.
+    private func mentionsRow(unread: Int) -> some View {
+        HStack(spacing: 6) {
+            Label("Mentions", systemImage: "person.crop.circle.badge.exclamationmark")
+            Spacer(minLength: 0)
+            if unread > 0 {
+                Text("\(unread)")
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color(nsColor: .quaternaryLabelColor)))
+            }
+        }
     }
 
     private func jiraExpansion(_ id: Int64) -> Binding<Bool> {
@@ -397,7 +464,7 @@ public struct RootView: View {
                 Label(space.name, systemImage: "rectangle.stack")
                     .tag(SidebarSection.jiraSpace(space.id))
             }
-            Label("Mentions", systemImage: "person.crop.circle.badge.exclamationmark")
+            mentionsRow(unread: jiraUnreadCount(account.id))
                 .tag(SidebarSection.jiraMentions(account.id))
             Button {
                 addSpaceAccount = account
@@ -406,7 +473,15 @@ public struct RootView: View {
             }
             .buttonStyle(.plain)
         } label: {
-            Label(account.name, systemImage: "globe")
+            HStack(spacing: 6) {
+                Label(account.name, systemImage: "globe")
+                // Collapsed with unread mentions: red dot so "something
+                // happened" is visible without expanding. When expanded,
+                // the Mentions row badge carries the count instead.
+                if !expandedJiraAccounts.contains(account.id), jiraUnreadCount(account.id) > 0 {
+                    Circle().fill(.red).frame(width: 7, height: 7)
+                }
+            }
         }
         .contextMenu {
             Button("Delete Account") {

@@ -37,8 +37,15 @@ private struct GitHubMentionsContent: View {
     @EnvironmentObject var appModel: AppModel
     @ObservedObject var model: GitHubMentionsModel
 
-    /// Read tickets stay hidden unless this is checked (default off).
-    @State private var showRead = false
+    /// Read tickets stay hidden unless this is checked. Persists per account.
+    @State private var showRead: Bool
+
+    private var showReadScope: String { "github-mentions-\(model.account.id)" }
+
+    init(model: GitHubMentionsModel) {
+        self.model = model
+        _showRead = State(initialValue: AppPreferences.showRead(scope: "github-mentions-\(model.account.id)"))
+    }
 
     private var visible: [GitHubMentionedIssue] {
         showRead
@@ -122,6 +129,9 @@ private struct GitHubMentionsContent: View {
             }
         }
         .task { await model.load() }
+        .onChange(of: showRead) { _, value in
+            AppPreferences.setShowRead(value, scope: showReadScope)
+        }
     }
 
     /// Mark the issue read and open its detail sheet. An ephemeral board

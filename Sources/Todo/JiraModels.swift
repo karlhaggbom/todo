@@ -35,6 +35,7 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
         self.account = account
         self.space = space
         self.cache = cache
+        mineOnly = AppPreferences.mineOnly(spaceID: space.id)
         self.client = JiraClient(credentials: .init(
             baseURL: account.baseURL,
             email: account.email,
@@ -162,9 +163,13 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
 
     /// Active board filter (synced from AppModel.filterText by the view).
     @Published var filterText: String = ""
-    /// "My tickets only": pre-selected; filters each lane to issues whose
-    /// assignee is the logged-in user. Client-side, so toggling is instant.
-    @Published var mineOnly = true
+    /// "My tickets only": persisted per space; filters each lane to issues
+    /// whose assignee is the logged-in user. Client-side, so toggling is
+    /// instant. The didSet write-through persists the toggle (initial
+    /// assignment in init doesn't trigger it, by Swift's rules).
+    @Published var mineOnly = true {
+        didSet { AppPreferences.setMineOnly(mineOnly, spaceID: space.id) }
+    }
     /// Account id of the logged-in user (fetched once on first load; nil
     /// until then, which the filter treats as "don't filter yet").
     @Published private(set) var myAccountID: String?

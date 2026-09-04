@@ -38,8 +38,16 @@ private struct MentionsContent: View {
     @ObservedObject var model: MentionsModel
     let space: JiraSpace
 
-    /// Read tickets stay hidden unless this is checked (default off).
-    @State private var showRead = false
+    /// Read tickets stay hidden unless this is checked. Persists per space.
+    @State private var showRead: Bool
+
+    private var showReadScope: String { "jira-mentions-\(space.id)" }
+
+    init(model: MentionsModel, space: JiraSpace) {
+        self.model = model
+        self.space = space
+        _showRead = State(initialValue: AppPreferences.showRead(scope: "jira-mentions-\(space.id)"))
+    }
 
     private var visible: [JiraIssue] {
         showRead
@@ -121,6 +129,9 @@ private struct MentionsContent: View {
             }
         }
         .task { await model.load() }
+        .onChange(of: showRead) { _, value in
+            AppPreferences.setShowRead(value, scope: showReadScope)
+        }
     }
 
     /// Mark the issue read and open its detail sheet. An ephemeral board

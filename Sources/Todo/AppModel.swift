@@ -133,6 +133,11 @@ struct DragSession {
 /// Holds selection, keyboard state, drag state, and UI toggles.
 public final class AppModel: ObservableObject {
     public init() {}
+    /// The main window, captured once at launch so background-click
+    /// dismissal can tell "click behind the sheet" apart from clicks in
+    /// the sheet, menus, or popovers (all separate NSWindows).
+    weak var mainWindow: NSWindow?
+
     // Board cursor
     @Published var selectedLane: Int = 0
     @Published var selectedItem: Int = 0
