@@ -10,6 +10,10 @@ public final class TodoStore: ObservableObject {
     @Published private(set) var jiraSpaces: [JiraSpace] = []
     @Published private(set) var githubAccounts: [GitHubAccount] = []
     @Published private(set) var githubRepos: [GitHubRepo] = []
+    /// Issues the user has opened (read) from the mentions pages. Key
+    /// formats: "TAP-123" (Jira), "owner/repo#123" (GitHub). Kept in sync
+    /// with the read_issues table so filtering is instant, client-side.
+    @Published private(set) var readIssueKeys: Set<String> = []
 
     let db: SQLiteDatabase
     /// Keychain namespace for API tokens. Tests inject a private service so
@@ -97,6 +101,10 @@ public final class TodoStore: ObservableObject {
             data BLOB NOT NULL,
             fetched_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS read_issues (
+            key TEXT PRIMARY KEY,
+            read_at REAL NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_tasks_lane ON tasks(lane_id, position);
         """)
         // Older databases predate the pinned-board column on jira_spaces.
@@ -133,6 +141,22 @@ public final class TodoStore: ObservableObject {
         jiraSpaces = try db.query("SELECT * FROM jira_spaces ORDER BY id", map: Self.space(from:))
         githubAccounts = try db.query("SELECT * FROM github_accounts ORDER BY id", map: Self.gitHubAccount(from:))
         githubRepos = try db.query("SELECT * FROM github_repos ORDER BY id", map: Self.gitHubRepo(from:))
+        readIssueKeys = Set(try db.query("SELECT key FROM read_issues", map: { $0.string("key") }))
+    }
+
+    /// Mark an issue as read (the user opened it from mentions).
+    /// Idempotent; writes through to SQLite immediately.
+    func markIssueRead(_ key: String) {
+        guard !readIssueKeys.contains(key) else { return }
+        readIssueKeys.insert(key)
+        do {
+            try db.run("INSERT OR IGNORE INTO read_issues (key, read_at) VALUES (?, ?)") { st in
+                st.bind(1, key)
+                st.bind(2, Date().timeIntervalSince1970)
+            }
+        } catch {
+            Diag.log.error("mark-read failed for \(key, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private static func lane(from st: SQLiteDatabase.Statement) -> Lane {

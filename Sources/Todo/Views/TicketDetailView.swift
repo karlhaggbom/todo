@@ -66,6 +66,18 @@ struct TicketDetailView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
             Spacer()
+            Button("Edit") {
+                dismiss()
+                // Sheets are presented from RootView and mutually exclusive —
+                // set the edit target one tick later, after this sheet is gone.
+                DispatchQueue.main.async {
+                    appModel.editTarget = EditIssueTarget(content: .jiraIssue(
+                        account: account, board: board,
+                        issue: JiraIssue(key: issue.key, fields: detail?.fields ?? issue.fields)
+                    ))
+                }
+            }
+            .buttonStyle(.borderless)
             if let status = detail?.fields.status {
                 Text(status.name)
                     .font(.system(size: 11, weight: .medium))

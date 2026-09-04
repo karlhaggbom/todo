@@ -33,7 +33,18 @@ struct GitHubMentionsView: View {
 }
 
 private struct GitHubMentionsContent: View {
+    @EnvironmentObject var store: TodoStore
+    @EnvironmentObject var appModel: AppModel
     @ObservedObject var model: GitHubMentionsModel
+
+    /// Read tickets stay hidden unless this is checked (default off).
+    @State private var showRead = false
+
+    private var visible: [GitHubMentionedIssue] {
+        showRead
+            ? model.mentioned
+            : model.mentioned.filter { !store.readIssueKeys.contains($0.readKey) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -47,6 +58,8 @@ private struct GitHubMentionsContent: View {
                 if model.isLoading {
                     ProgressView().controlSize(.small)
                 }
+                Toggle("Show read", isOn: $showRead)
+                    .toggleStyle(.checkbox)
                 Button {
                     Task { await model.load() }
                 } label: {
@@ -54,6 +67,7 @@ private struct GitHubMentionsContent: View {
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.borderless)
+                .pointingHandOnHover()
             }
             .padding(14)
 
@@ -61,34 +75,44 @@ private struct GitHubMentionsContent: View {
 
             if let error = model.lastError {
                 ErrorBanner(message: error, onDismiss: { model.lastError = nil })
-            } else if model.mentioned.isEmpty && !model.isLoading {
+            } else if visible.isEmpty && !model.isLoading {
                 ContentUnavailableView(
-                    "No mentions",
-                    systemImage: "bell.slash",
-                    description: Text("Nothing mentions @\(model.account.login).")
+                    model.mentioned.isEmpty ? "No mentions" : "All read",
+                    systemImage: model.mentioned.isEmpty ? "bell.slash" : "checkmark.seal",
+                    description: Text(model.mentioned.isEmpty
+                        ? "Nothing mentions @\(model.account.login)."
+                        : "You've read every mention — check “Show read” to see them again.")
                 )
             } else {
-                List(model.mentioned) { item in
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 5) {
-                            Text(item.repo.name)
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.tint)
-                            Text("#\(item.issue.number)")
-                                .font(.system(size: 10, weight: .semibold).monospaced())
-                                .foregroundStyle(.tertiary)
-                            Spacer()
-                        }
-                        Text(item.issue.title)
-                            .font(.system(size: 12, weight: .medium))
+                List(visible) { item in
+                    Button {
+                        open(item)
+                    } label: {
+                        // Same card design as the Jira mentions page; the
+                        // repo label keeps cross-repo context.
+                        GitHubCardView(issue: item.issue, isSelected: false, repoName: item.repo.name)
+                            .padding(.vertical, 2)
+                            .opacity(store.readIssueKeys.contains(item.readKey) ? 0.55 : 1)
                     }
-                    .padding(.vertical, 2)
+                    .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
+                    .pointingHandOnHover()
                 }
                 .listStyle(.plain)
             }
         }
         .task { await model.load() }
+    }
+
+    /// Mark the issue read and open its detail sheet. An ephemeral board
+    /// model supplies the detail view's client and optimistic-update hooks
+    /// without touching any real board's state.
+    private func open(_ item: GitHubMentionedIssue) {
+        store.markIssueRead(item.readKey)
+        let board = GitHubBoardModel(account: model.account, repo: item.repo, token: model.token)
+        appModel.issueDetailTarget = IssueDetailTarget(content: .githubIssue(
+            account: model.account, board: board, issue: item.issue
+        ))
     }
 }
 

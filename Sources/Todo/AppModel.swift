@@ -35,6 +35,27 @@ struct DeleteTarget: Identifiable {
     let content: Content
 }
 
+/// Edit-issue sheet target, presented from RootView. Reuses the create
+/// sheets in edit mode (Save instead of Create). Reached from card
+/// context menus and the detail views.
+struct EditIssueTarget: Identifiable {
+    enum Content {
+        case jiraIssue(account: JiraAccount, board: JiraBoardModel, issue: JiraIssue)
+        case githubIssue(account: GitHubAccount, board: GitHubBoardModel, issue: GitHubIssue)
+    }
+    let id = UUID()
+    let content: Content
+}
+
+/// Direct issue-detail sheet target. Unlike `detailTarget` (a cursor
+/// position resolved by the active board), this carries the content
+/// itself — used from the mentions pages, which have no board context
+/// to resolve from.
+struct IssueDetailTarget: Identifiable {
+    let id = UUID()
+    let content: DetailSheetContent
+}
+
 // MARK: - Keyboard navigation abstraction
 
 /// A surface that can be driven by Vimium-style keys.
@@ -90,9 +111,11 @@ struct DragInsertion: Equatable {
 
 // MARK: - Drag session
 
-/// Live state for one drag of a card across the board.
+/// Live state for one drag of a card across the board. `itemID` is a
+/// string so the same machinery serves every board: "\(task.id)" (local),
+/// the Jira issue key, "\(number)" (GitHub).
 struct DragSession {
-    let taskID: Int64
+    let itemID: String
     /// Translation from the card's resting position (used for the floating copy).
     var offset: CGSize
     /// Smoothed (EMA) horizontal velocity used for distortion.
@@ -139,6 +162,8 @@ public final class AppModel: ObservableObject {
 
     /// Create-issue sheet, presented from RootView.
     @Published var createTarget: CreateIssueTarget?
+    @Published var editTarget: EditIssueTarget?
+    @Published var issueDetailTarget: IssueDetailTarget?
     /// Delete-confirmation sheet, presented from RootView.
     @Published var deleteTarget: DeleteTarget?
     /// Set by the active board view (like `navigable`); the "n" key invokes it.

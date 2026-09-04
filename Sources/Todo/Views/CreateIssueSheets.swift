@@ -11,6 +11,9 @@ struct CreateIssueSheet: View {
 
     let account: JiraAccount
     @ObservedObject var board: JiraBoardModel
+    /// Non-nil = edit mode: the same form, prefilled, with a Save button
+    /// instead of Create (the create modal doubles as the edit modal).
+    var editing: JiraIssue? = nil
 
     @State private var title = ""
     @State private var bodyText = ""
@@ -26,10 +29,16 @@ struct CreateIssueSheet: View {
     @State private var loadingMeta = false
     @State private var errorBanner: String?
     @State private var isCreating = false
+    /// Edit mode: whether the issue is in the selected board's active
+    /// sprint right now (server truth), so Save can diff the toggle.
+    @State private var inSelectedSprint = false
+    /// Edit mode: false when the issue's current priority isn't among the
+    /// server's priorities — then the field is left untouched on save.
+    @State private var priorityMatched = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("New Issue in \(resolvedProjectKey ?? board.space.projectKey)")
+            Text(editing.map { "Edit \($0.key)" } ?? "New Issue in \(resolvedProjectKey ?? board.space.projectKey)")
                 .font(.system(size: 15, weight: .semibold))
 
             Grid(alignment: .leading, verticalSpacing: 8) {
@@ -88,7 +97,13 @@ struct CreateIssueSheet: View {
                         }
                         .labelsHidden()
                         .onChange(of: selectedBoardID) { _, _ in
-                            useSprint = selectedSprint != nil
+                            if editing != nil {
+                                // Membership is server truth: reflect whether
+                                // the issue is in this board's active sprint.
+                                Task { await syncSprintMembership() }
+                            } else {
+                                useSprint = selectedSprint != nil
+                            }
                         }
                     }
                 }
@@ -128,8 +143,12 @@ struct CreateIssueSheet: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Create") {
-                    Task { await create() }
+                Button(editing == nil ? "Create" : "Save") {
+                    if editing == nil {
+                        Task { await create() }
+                    } else {
+                        Task { await edit() }
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty || isCreating)
@@ -137,12 +156,34 @@ struct CreateIssueSheet: View {
         }
         .padding(18)
         .frame(width: 460)
-        .task { await loadMeta() }
+        .task { prefillIfEditing(); await loadMeta() }
     }
 
     private var selectedSprint: JiraClient.JiraSprintsPage.Sprint? {
         guard let id = selectedBoardID, let s = sprintsByBoard[id] else { return nil }
         return s
+    }
+
+    /// Seed the form from the issue being edited, before any metadata has
+    /// arrived, so the sheet is instantly populated.
+    private func prefillIfEditing() {
+        guard let editing else { return }
+        title = editing.fields.summary
+        bodyText = editing.fields.description?.plainText ?? ""
+        assigneeID = editing.fields.assignee?.accountID
+    }
+
+    /// Edit mode: sync the sprint toggle with the issue's actual membership
+    /// in the selected board's active sprint.
+    private func syncSprintMembership() async {
+        guard let editing, let sprint = selectedSprint else {
+            inSelectedSprint = false
+            useSprint = false
+            return
+        }
+        let member = await board.client.issueInSprint(issueKey: editing.key, sprintID: sprint.id)
+        inSelectedSprint = member
+        useSprint = member
     }
 
     private func loadMeta() async {
@@ -183,8 +224,25 @@ struct CreateIssueSheet: View {
             selectedBoardID = b.first(where: { $0.id == pinned })?.id
                 ?? b.first(where: { byBoard[$0.id] != nil })?.id
                 ?? b.first?.id
-            useSprint = selectedSprint != nil
-            priorityID = p.first { $0.name.lowercased() == "medium" }?.id ?? p.first?.id
+            if let editing {
+                // Edit mode: mirror the issue's current values onto the form.
+                // The sprint toggle is synced by onChange via a membership
+                // check; only defaults belong here.
+                if let name = editing.fields.priority?.name,
+                   let match = p.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                    priorityID = match.id
+                    priorityMatched = true
+                } else if editing.fields.priority != nil {
+                    priorityMatched = false
+                }
+                if let acc = editing.fields.assignee?.accountID,
+                   !u.contains(where: { $0.accountID == acc }) {
+                    users.append(JiraUser(accountID: acc, displayName: editing.fields.assignee?.displayName ?? "Unknown", avatarURL: nil))
+                }
+            } else {
+                useSprint = selectedSprint != nil
+                priorityID = p.first { $0.name.lowercased() == "medium" }?.id ?? p.first?.id
+            }
         } catch {
             Diag.log.error("create-issue meta failed: \(error.localizedDescription, privacy: .public)")
             errorBanner = "Couldn't load metadata (assignee/priority/sprint): \(error.localizedDescription)"
@@ -227,6 +285,77 @@ struct CreateIssueSheet: View {
             errorBanner = "Couldn't create issue: \(error.localizedDescription)"
         }
     }
+
+    /// Edit mode: PUT the changed fields, mirror sprint membership changes,
+    /// then patch the board copy in place (no reload needed).
+    private func edit() async {
+        guard let editing else { return }
+        let summary = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return }
+        isCreating = true
+        defer { isCreating = false }
+        let description = ADFDocument.paragraphs(from: bodyText)
+        // Double optionals: nil = don't touch the field, .some(nil) = clear it.
+        let priority: [String: String]??
+        if let priorityID {
+            priority = .some(["id": priorityID])
+        } else if !priorityMatched {
+            // Current priority isn't representable in this form — leave it.
+            priority = nil
+        } else if editing.fields.priority != nil {
+            priority = .some(nil)
+        } else {
+            priority = nil
+        }
+        let assignee: [String: String]??
+        if let assigneeID {
+            assignee = .some(["accountId": assigneeID])
+        } else if editing.fields.assignee != nil {
+            assignee = .some(nil)
+        } else {
+            assignee = nil
+        }
+        do {
+            try await board.client.editIssue(key: editing.key, fields: .init(
+                summary: summary,
+                description: description,
+                priority: priority,
+                assignee: assignee
+            ))
+            // Sprint membership is managed outside the issue — diff the
+            // toggle against server truth. Failure here shouldn't fail the
+            // (successful) field edit.
+            if let selectedSprint {
+                do {
+                    if useSprint && !inSelectedSprint {
+                        try await board.client.addIssueToSprint(sprintID: selectedSprint.id, issueKey: editing.key)
+                    } else if !useSprint && inSelectedSprint {
+                        try await board.client.removeIssueFromSprint(sprintID: selectedSprint.id, issueKey: editing.key)
+                    }
+                } catch {
+                    Diag.log.error("sprint-membership edit failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            board.applyEdit(
+                issueKey: editing.key,
+                summary: summary,
+                description: description,
+                assignee: assigneeID.map { id in
+                    JiraIssue.Fields.Assignee(
+                        displayName: users.first(where: { $0.accountID == id })?.displayName,
+                        accountID: id
+                    )
+                },
+                priority: priorityID.flatMap { id in
+                    priorities.first(where: { $0.id == id }).map { JiraIssue.Fields.Priority(name: $0.name) }
+                }
+            )
+            dismiss()
+        } catch {
+            Diag.log.error("jira edit-issue failed: \(error.localizedDescription, privacy: .public)")
+            errorBanner = "Couldn't save: \(error.localizedDescription)"
+        }
+    }
 }
 
 // MARK: - Create issue (GitHub)
@@ -238,6 +367,8 @@ struct CreateGitHubIssueSheet: View {
 
     let account: GitHubAccount
     @ObservedObject var board: GitHubBoardModel
+    /// Non-nil = edit mode: prefilled form, Save instead of Create.
+    var editing: GitHubIssue? = nil
 
     @State private var title = ""
     @State private var bodyText = ""
@@ -249,7 +380,7 @@ struct CreateGitHubIssueSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("New Issue in \(board.repo.owner)/\(board.repo.repo)")
+            Text(editing.map { "Edit #\($0.number)" } ?? "New Issue in \(board.repo.owner)/\(board.repo.repo)")
                 .font(.system(size: 15, weight: .semibold))
 
             Grid(alignment: .leading, verticalSpacing: 8) {
@@ -299,8 +430,12 @@ struct CreateGitHubIssueSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Create") {
-                    Task { await create() }
+                Button(editing == nil ? "Create" : "Save") {
+                    if editing == nil {
+                        Task { await create() }
+                    } else {
+                        Task { await edit() }
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty || isCreating)
@@ -308,13 +443,31 @@ struct CreateGitHubIssueSheet: View {
         }
         .padding(18)
         .frame(width: 460)
-        .task { await loadUsers() }
+        .task {
+            prefillIfEditing()
+            await loadUsers()
+        }
+    }
+
+    /// Seed the form from the issue being edited before collaborators load.
+    private func prefillIfEditing() {
+        guard let editing else { return }
+        title = editing.title
+        bodyText = editing.body ?? ""
+        assigneeLogin = editing.assignees?.first?.login
     }
 
     private func loadUsers() async {
         loadingUsers = true
         do {
             users = try await board.client.collaborators(owner: board.repo.owner, repo: board.repo.repo)
+            // Edit mode: make sure the issue's current assignees are
+            // pickable even if they're outside the collaborator list.
+            if let editing {
+                for a in editing.assignees ?? [] where !users.contains(where: { $0.login == a.login }) {
+                    users.append(GitHubUser(login: a.login, name: a.name))
+                }
+            }
         } catch {
             Diag.log.error("create-issue collaborators failed: \(error.localizedDescription, privacy: .public)")
             errorBanner = "Couldn't load collaborators: \(error.localizedDescription)"
@@ -340,6 +493,38 @@ struct CreateGitHubIssueSheet: View {
         } catch {
             Diag.log.error("github create-issue failed: \(error.localizedDescription, privacy: .public)")
             errorBanner = "Couldn't create issue: \(error.localizedDescription)"
+        }
+    }
+
+    /// Edit mode: PATCH title/body/assignees. The PATCH replaces the whole
+    /// assignee list, so a multi-assignee issue keeps its full list when the
+    /// (single) picker was left on the first assignee. The server response
+    /// replaces the board copy.
+    private func edit() async {
+        guard let editing else { return }
+        let summary = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return }
+        isCreating = true
+        defer { isCreating = false }
+        var assignees: [String] = assigneeLogin.map { [$0] } ?? []
+        let original = (editing.assignees ?? []).map(\.login)
+        if assignees == Array(original.prefix(1)) {
+            assignees = original
+        }
+        do {
+            let updated = try await board.client.editIssue(
+                owner: board.repo.owner,
+                repo: board.repo.repo,
+                number: editing.number,
+                title: summary,
+                body: bodyText.isEmpty ? nil : bodyText,
+                assignees: assignees
+            )
+            board.applyEdit(updated)
+            dismiss()
+        } catch {
+            Diag.log.error("github edit-issue failed: \(error.localizedDescription, privacy: .public)")
+            errorBanner = "Couldn't save: \(error.localizedDescription)"
         }
     }
 }

@@ -169,6 +169,15 @@ final class GitHubClient {
         return try await send(request("PATCH", path, body: payload), as: GitHubIssue.self)
     }
 
+    /// Edit an existing issue's title/body/assignees. PATCH replaces the
+    /// assignee list with the given one; returns the server-rendered issue.
+    func editIssue(owner: String, repo: String, number: Int, title: String, body: String?, assignees: [String]) async throws -> GitHubIssue {
+        let path = try repoPath(owner: owner, repo: repo) + "/issues/\(number)"
+        struct Payload: Encodable { let title: String; let body: String?; let assignees: [String] }
+        let data = try JSONEncoder().encode(Payload(title: title, body: body, assignees: assignees))
+        return try await send(request("PATCH", path, body: data), as: GitHubIssue.self)
+    }
+
     /// Users who can be mentioned in this repo (collaborators).
     func collaborators(owner: String, repo: String) async throws -> [GitHubUser] {
         let path = try repoPath(owner: owner, repo: repo) + "/collaborators?per_page=100"

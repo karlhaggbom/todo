@@ -3,15 +3,15 @@ import SwiftUI
 // MARK: - Frame preferences (for drag hit-testing)
 
 struct LaneFramesKey: PreferenceKey {
-    static var defaultValue: [Int64: CGRect] = [:]
-    static func reduce(value: inout [Int64: CGRect], nextValue: () -> [Int64: CGRect]) {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { $1 })
     }
 }
 
 struct CardFramesKey: PreferenceKey {
-    static var defaultValue: [Int64: CGRect] = [:]
-    static func reduce(value: inout [Int64: CGRect], nextValue: () -> [Int64: CGRect]) {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { $1 })
     }
 }
@@ -21,8 +21,8 @@ struct CardFramesKey: PreferenceKey {
 struct BoardView: View {
     @EnvironmentObject var store: TodoStore
     @EnvironmentObject var model: AppModel
-    @State private var laneFrames: [Int64: CGRect] = [:]
-    @State private var cardFrames: [Int64: CGRect] = [:]
+    @State private var laneFrames: [String: CGRect] = [:]
+    @State private var cardFrames: [String: CGRect] = [:]
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -79,8 +79,8 @@ struct BoardView: View {
     private var floatingCard: some View {
         if let drag = model.drag,
            !drag.settling,
-           let frame = cardFrames[drag.taskID],
-           let task = store.tasks.first(where: { $0.id == drag.taskID }) {
+           let frame = cardFrames[drag.itemID],
+           let task = store.tasks.first(where: { String($0.id) == drag.itemID }) {
             TaskCardView(task: task, isSelected: false)
                 .frame(width: frame.width)
                 .modifier(CardDistortion(vx: drag.smoothedVX))
@@ -89,8 +89,8 @@ struct BoardView: View {
                 .allowsHitTesting(false)
         } else if let drag = model.drag,
                   drag.settling,
-                  let frame = cardFrames[drag.taskID],
-                  let task = store.tasks.first(where: { $0.id == drag.taskID }) {
+                  let frame = cardFrames[drag.itemID],
+                  let task = store.tasks.first(where: { String($0.id) == drag.itemID }) {
             TaskCardView(task: task, isSelected: false)
                 .frame(width: frame.width)
                 .modifier(CardDistortion(vx: drag.smoothedVX))
@@ -121,12 +121,12 @@ struct BoardView: View {
     }
 
     /// Compute the drop target for a pointer location in board space.
-    func computeInsertion(location: CGPoint, excluding taskID: Int64) -> DragInsertion? {
+    func computeInsertion(location: CGPoint, excluding itemID: String) -> DragInsertion? {
         guard store.lanes.count > 0 else { return nil }
         // Find the lane under the pointer (with a small grab margin).
         var laneHit: (index: Int, frame: CGRect)?
         for (i, lane) in store.lanes.enumerated() {
-            guard let f = laneFrames[lane.id] else { continue }
+            guard let f = laneFrames[String(lane.id)] else { continue }
             if location.x >= f.minX - 6 && location.x <= f.maxX + 6 {
                 laneHit = (i, f)
                 break
@@ -136,8 +136,8 @@ struct BoardView: View {
 
         let lane = store.lanes[hit.index]
         let cards = store.laneTasks(lane.id).sorted { $0.position < $1.position }
-        let draggingWithinLane = store.tasks.first { $0.id == taskID }?.laneID == lane.id
-        let dragIdx = draggingWithinLane ? cards.firstIndex { $0.id == taskID } ?? 0 : -1
+        let draggingWithinLane = store.tasks.first { String($0.id) == itemID }?.laneID == lane.id
+        let dragIdx = draggingWithinLane ? cards.firstIndex { String($0.id) == itemID } ?? 0 : -1
 
         // Insertion index semantics: position within the lane's list
         // EXCLUDING the dragged task (matches store.moveTask(at:)).
@@ -145,10 +145,10 @@ struct BoardView: View {
         // (cross-lane, where the dragged task isn't in the list anyway).
         var index = draggingWithinLane ? max(cards.count - 1, 0) : cards.count
         for (j, card) in cards.enumerated() {
-            guard card.id != taskID else { continue }
+            guard String(card.id) != itemID else { continue }
             // Only visible cards have frames; invisible (filtered-out) cards
             // still occupy list slots, which `index` accounts for.
-            guard let cf = cardFrames[card.id] else { continue }
+            guard let cf = cardFrames[String(card.id)] else { continue }
             if location.y < cf.midY {
                 // Skip the dragged task's own slot when counting predecessors.
                 index = (draggingWithinLane && dragIdx < j) ? j - 1 : j
@@ -167,7 +167,7 @@ struct LaneView: View {
     let tasks: [TodoTask]
     @ObservedObject var model: AppModel
     @ObservedObject var store: TodoStore
-    var computeInsertion: (CGPoint, Int64) -> DragInsertion?
+    var computeInsertion: (CGPoint, String) -> DragInsertion?
 
     @State private var renameFieldVisible = false
     @State private var laneNameDraft = ""
@@ -183,14 +183,14 @@ struct LaneView: View {
     /// the card will actually land.
     private var placeholderVisibleIndex: Int? {
         guard let ins = insertion, let d = model.drag else { return nil }
-        let others = store.laneTasks(lane.id).filter { $0.id != d.taskID }
+        let others = store.laneTasks(lane.id).filter { String($0.id) != d.itemID }
         guard ins.index <= others.count else { return nil }
         let visibleIDs = Set(tasks.map(\.id))
         let p = others[..<ins.index].filter { visibleIDs.contains($0.id) }.count
         // Same-lane downward drag: the dragged card still occupies its visible
         // slot above the insertion point, so the rendered list keeps one extra
         // slot — the gap belongs one further down.
-        if let q = tasks.firstIndex(where: { $0.id == d.taskID }), p > q {
+        if let q = tasks.firstIndex(where: { String($0.id) == d.itemID }), p > q {
             return p + 1
         }
         return p
@@ -290,7 +290,7 @@ struct LaneView: View {
     private func card(_ task: TodoTask, at index: Int) -> some View {
         let isSelected = model.selectedLane == laneIndex && model.selectedItem == index
         let renaming = model.renameTarget == CursorPosition(lane: laneIndex, item: index)
-        let dragging = model.drag?.taskID == task.id && model.drag?.settling == false
+        let dragging = model.drag?.itemID == String(task.id) && model.drag?.settling == false
 
         Group {
             if renaming {
@@ -331,28 +331,28 @@ struct LaneView: View {
     private func dragGesture(for task: TodoTask) -> some Gesture {
         DragGesture(minimumDistance: 4, coordinateSpace: .named("board"))
             .onChanged { value in
-                if let d = model.drag, d.taskID != task.id, !d.settling {
+                if let d = model.drag, d.itemID != String(task.id), !d.settling {
                     return // only one drag at a time
                 }
                 if model.drag == nil {
                     model.drag = DragSession(
-                        taskID: task.id,
+                        itemID: String(task.id),
                         offset: .zero,
                         smoothedVX: 0,
                         insertion: nil,
                         settling: false
                     )
                 }
-                guard model.drag?.taskID == task.id else { return }
+                guard model.drag?.itemID == String(task.id) else { return }
                 var d = model.drag!
                 d.offset = value.translation
                 // EMA smoothing for the distortion input.
                 d.smoothedVX = d.smoothedVX * 0.78 + value.velocity.width * 0.22
-                d.insertion = computeInsertion(value.location, task.id)
+                d.insertion = computeInsertion(value.location, String(task.id))
                 model.drag = d
             }
             .onEnded { _ in
-                guard let d = model.drag, d.taskID == task.id, !d.settling else { return }
+                guard let d = model.drag, d.itemID == String(task.id), !d.settling else { return }
 
                 // Commit the move. `ins.index` is an insertion index in the
                 // target lane excluding the moved task (matches moveTask(at:)).
@@ -377,9 +377,9 @@ struct LaneView: View {
                     model.drag?.settling = true
                     model.drag?.settleOpacity = 0
                 }
-                let tid = task.id
+                let tid = String(task.id)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
-                    if model.drag?.taskID == tid {
+                    if model.drag?.itemID == tid {
                         model.drag = nil
                     }
                 }
@@ -418,10 +418,73 @@ struct LaneView: View {
         GeometryReader { geo in
             Color.clear.preference(
                 key: LaneFramesKey.self,
-                value: [lane.id: geo.frame(in: .named("board"))]
+                value: [String(lane.id): geo.frame(in: .named("board"))]
             )
         }
     }
+}
+
+// MARK: - Shared drag machinery for remote boards (Jira/GitHub)
+//
+// The remote boards reuse the local board's drag session, distortion, and
+// settle animation, but their commit goes through the board's optimistic
+// transition API instead of the local store. Within-lane reordering isn't
+// supported by the remote APIs, so same-lane drags produce no insertion:
+// the card simply settles back where it came from.
+
+/// Per-board drag wiring. `computeInsertion` hit-tests the pointer in
+/// board space (returning nil for same-lane or no-lane); `commit` fires
+/// on drop (optimistic lane transition); `select` places the cursor.
+struct BoardDragConfig {
+    let computeInsertion: (CGPoint, String) -> DragInsertion?
+    let commit: (DragInsertion) -> Void
+    let select: (DragInsertion) -> Void
+}
+
+/// The drag gesture for one card on a remote board. Mirrors the local
+/// board's gesture exactly, including the EMA-smoothed velocity that
+/// feeds CardDistortion and the spring-back settle.
+func boardDragGesture(itemID: String, appModel: AppModel, config: BoardDragConfig) -> some Gesture {
+    DragGesture(minimumDistance: 4, coordinateSpace: .named("board"))
+        .onChanged { value in
+            if let d = appModel.drag, d.itemID != itemID, !d.settling {
+                return // only one drag at a time
+            }
+            if appModel.drag == nil {
+                appModel.drag = DragSession(
+                    itemID: itemID,
+                    offset: .zero,
+                    smoothedVX: 0,
+                    insertion: nil,
+                    settling: false
+                )
+            }
+            guard appModel.drag?.itemID == itemID else { return }
+            var d = appModel.drag!
+            d.offset = value.translation
+            d.smoothedVX = d.smoothedVX * 0.78 + value.velocity.width * 0.22
+            d.insertion = config.computeInsertion(value.location, itemID)
+            appModel.drag = d
+        }
+        .onEnded { _ in
+            guard let d = appModel.drag, d.itemID == itemID, !d.settling else { return }
+            if let ins = d.insertion {
+                config.commit(ins)
+                config.select(ins)
+            }
+            // Spring the floating copy onto its slot while fading it out.
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                appModel.drag?.offset = .zero
+                appModel.drag?.smoothedVX = 0
+                appModel.drag?.settling = true
+                appModel.drag?.settleOpacity = 0
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                if appModel.drag?.itemID == itemID {
+                    appModel.drag = nil
+                }
+            }
+        }
 }
 
 // MARK: - Placeholder
@@ -481,7 +544,7 @@ struct TaskCardView: View {
         GeometryReader { geo in
             Color.clear.preference(
                 key: CardFramesKey.self,
-                value: [task.id: geo.frame(in: .named("board"))]
+                value: [String(task.id): geo.frame(in: .named("board"))]
             )
         }
     }

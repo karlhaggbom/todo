@@ -476,4 +476,25 @@ import Foundation
         #expect(store.cachedData(for: "jira-board-1")?.data == second)
         #expect(store.cachedData(for: "github-board-1")?.data == Data("x".utf8))
     }
+
+    @Test func readIssuesPersistAcrossStoreReloads() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("todo-read-\(UUID().uuidString).sqlite3")
+        let store = try TodoStore(databasePath: url.path)
+
+        #expect(store.readIssueKeys.isEmpty)
+
+        // Read keys work for both formats and are idempotent.
+        store.markIssueRead("TAP-123")
+        store.markIssueRead("some-org/some-repo#42")
+        store.markIssueRead("TAP-123")
+        #expect(store.readIssueKeys == ["TAP-123", "some-org/some-repo#42"])
+
+        // A fresh store over the same database must see them — read state
+        // is durable, not just in-memory.
+        let reopened = try TodoStore(databasePath: url.path)
+        #expect(reopened.readIssueKeys == ["TAP-123", "some-org/some-repo#42"])
+
+        try? FileManager.default.removeItem(at: url)
+    }
 }

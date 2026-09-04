@@ -112,7 +112,7 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
                         assignee: issue.fields.assignee.map {
                             .init(displayName: $0.displayName, accountID: $0.accountID)
                         },
-                        priority: nil,
+                        priority: issue.fields.priority.map { .init(name: $0.name) },
                         updated: issue.fields.updated
                     )
                 )
@@ -195,6 +195,18 @@ final class JiraBoardModel: ObservableObject, KeyboardNavigable {
             lastError = error.localizedDescription
             return false
         }
+    }
+
+    /// Apply a successful server edit to the board copy in place — the
+    /// sheet has already PUT the changes; this keeps the card in sync
+    /// without a reload. Status/lanes untouched.
+    @MainActor
+    func applyEdit(issueKey: String, summary: String, description: ADFDocument, assignee: JiraIssue.Fields.Assignee?, priority: JiraIssue.Fields.Priority?) {
+        guard let idx = issues.firstIndex(where: { $0.key == issueKey }) else { return }
+        issues[idx].fields.summary = summary
+        issues[idx].fields.description = description.plainText.isEmpty ? nil : description
+        issues[idx].fields.assignee = assignee
+        issues[idx].fields.priority = priority
     }
 
     /// All transitions for an issue (used in detail view picker).
@@ -301,6 +313,7 @@ final class MentionsModel: ObservableObject {
     let account: JiraAccount
     let client: JiraClient
     let space: JiraSpace
+    let token: String
 
     @Published private(set) var mentioned: [JiraIssue] = []
     @Published var lastError: String?
@@ -309,6 +322,7 @@ final class MentionsModel: ObservableObject {
     init(account: JiraAccount, space: JiraSpace, token: String) {
         self.account = account
         self.space = space
+        self.token = token
         self.client = JiraClient(credentials: .init(
             baseURL: account.baseURL,
             email: account.email,

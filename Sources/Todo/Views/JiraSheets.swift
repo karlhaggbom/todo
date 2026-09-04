@@ -33,8 +33,19 @@ struct MentionsView: View {
 }
 
 private struct MentionsContent: View {
+    @EnvironmentObject var store: TodoStore
+    @EnvironmentObject var appModel: AppModel
     @ObservedObject var model: MentionsModel
     let space: JiraSpace
+
+    /// Read tickets stay hidden unless this is checked (default off).
+    @State private var showRead = false
+
+    private var visible: [JiraIssue] {
+        showRead
+            ? model.mentioned
+            : model.mentioned.filter { !store.readIssueKeys.contains($0.key) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -48,6 +59,8 @@ private struct MentionsContent: View {
                 if model.isLoading {
                     ProgressView().controlSize(.small)
                 }
+                Toggle("Show read", isOn: $showRead)
+                    .toggleStyle(.checkbox)
                 Button {
                     Task { await model.load() }
                 } label: {
@@ -55,6 +68,7 @@ private struct MentionsContent: View {
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.borderless)
+                .pointingHandOnHover()
             }
             .padding(14)
 
@@ -62,24 +76,42 @@ private struct MentionsContent: View {
 
             if let error = model.lastError {
                 ErrorBanner(message: error, onDismiss: { model.lastError = nil })
-            } else if model.mentioned.isEmpty && !model.isLoading {
+            } else if visible.isEmpty && !model.isLoading {
                 ContentUnavailableView(
-                    "No mentions",
-                    systemImage: "bell.slash",
-                    description: Text("Nothing in \(space.projectKey) mentions you.")
+                    model.mentioned.isEmpty ? "No mentions" : "All read",
+                    systemImage: model.mentioned.isEmpty ? "bell.slash" : "checkmark.seal",
+                    description: Text(model.mentioned.isEmpty
+                        ? "Nothing in \(space.projectKey) mentions you."
+                        : "You've read every mention — check “Show read” to see them again.")
                 )
             } else {
-                List(model.mentioned) { issue in
-                    HStack(spacing: 8) {
+                List(visible) { issue in
+                    Button {
+                        open(issue)
+                    } label: {
                         JiraCardView(issue: issue, isSelected: false)
                             .padding(.vertical, 2)
+                            .opacity(store.readIssueKeys.contains(issue.key) ? 0.55 : 1)
                     }
+                    .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
+                    .pointingHandOnHover()
                 }
                 .listStyle(.plain)
             }
         }
         .task { await model.load() }
+    }
+
+    /// Mark the issue read and open its detail sheet. An ephemeral board
+    /// model supplies the detail view's client and optimistic-update hooks
+    /// without touching any real board's state.
+    private func open(_ issue: JiraIssue) {
+        store.markIssueRead(issue.key)
+        let board = JiraBoardModel(account: model.account, space: space, token: model.token)
+        appModel.issueDetailTarget = IssueDetailTarget(content: .jiraTicket(
+            account: model.account, board: board, issue: issue
+        ))
     }
 }
 

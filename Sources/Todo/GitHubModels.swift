@@ -113,6 +113,14 @@ final class GitHubBoardModel: ObservableObject, KeyboardNavigable {
 
     // MARK: Board structure
 
+    /// Apply a successful server edit: the PATCH returns the updated issue,
+    /// so the server-rendered copy replaces the board copy in place.
+    @MainActor
+    func applyEdit(_ updated: GitHubIssue) {
+        guard let idx = issues.firstIndex(where: { $0.number == updated.number }) else { return }
+        issues[idx] = updated
+    }
+
     func issues(inLane laneID: String) -> [GitHubIssue] {
         let base = issues.filter { $0.laneID == laneID }
         let scoped = mineOnly
@@ -249,6 +257,7 @@ final class GitHubMentionsModel: ObservableObject {
     let account: GitHubAccount
     let client: GitHubClient
     let repos: [GitHubRepo]
+    let token: String
 
     @Published private(set) var mentioned: [GitHubMentionedIssue] = []
     @Published var lastError: String?
@@ -257,6 +266,7 @@ final class GitHubMentionsModel: ObservableObject {
     init(account: GitHubAccount, repos: [GitHubRepo], token: String) {
         self.account = account
         self.repos = repos
+        self.token = token
         self.client = GitHubClient(credentials: .init(
             baseURL: account.baseURL,
             token: token
@@ -292,4 +302,7 @@ struct GitHubMentionedIssue: Identifiable, Hashable {
     let repo: GitHubRepo
     let issue: GitHubIssue
     var id: String { "\(repo.id)-\(issue.number)" }
+    /// Stable read-tracking key (survives deleting and re-adding the repo,
+    /// unlike the id which uses the row id).
+    var readKey: String { "\(repo.owner)/\(repo.repo)#\(issue.number)" }
 }

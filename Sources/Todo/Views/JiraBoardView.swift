@@ -42,6 +42,11 @@ private struct JiraBoardContent: View {
     let space: JiraSpace
     @ObservedObject var appModel: AppModel
 
+    // Drag-and-drop (same machinery as the local board): frames are
+    // reported in the "board" coordinate space for hit-testing.
+    @State private var laneFrames: [String: CGRect] = [:]
+    @State private var cardFrames: [String: CGRect] = [:]
+
     var body: some View {
         let _ = {
             Diag.boardBodyEvals += 1
@@ -54,7 +59,10 @@ private struct JiraBoardContent: View {
             if let error = model.lastError {
                 errorBanner(error)
             }
-            boardBody
+            ZStack(alignment: .topLeading) {
+                boardBody
+                floatingCard
+            }
         }
         .task { await model.load() }
         .onAppear {
@@ -153,6 +161,9 @@ private struct JiraBoardContent: View {
                         .frame(maxHeight: .infinity, alignment: .top)
                         .padding(14)
                     }
+                    .coordinateSpace(name: "board")
+                    .onPreferenceChange(LaneFramesKey.self) { laneFrames = $0 }
+                    .onPreferenceChange(CardFramesKey.self) { cardFrames = $0 }
                     .onChange(of: appModel.selectedLane) { _, _ in
                         guard model.statuses.indices.contains(appModel.selectedLane) else { return }
                         proxy.scrollTo(model.statuses[appModel.selectedLane].id, anchor: .center)
@@ -165,6 +176,9 @@ private struct JiraBoardContent: View {
     private func jiraLane(status: JiraStatus, laneIndex: Int) -> some View {
         let issues = model.issues(inStatus: status.name)
         let isSelected = appModel.selectedLane == laneIndex
+        let isDropTarget = appModel.drag?.settling == false
+            && appModel.drag?.insertion?.lane == laneIndex
+        let placeholderIndex = insertionIndex(laneIndex: laneIndex)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
@@ -188,23 +202,13 @@ private struct JiraBoardContent: View {
                 ScrollView([.vertical]) {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(issues.enumerated()), id: \.element.id) { index, issue in
-                            JiraCardView(issue: issue, isSelected: isSelected && appModel.selectedItem == index)
-                                .modifier(InstantTap(
-                                    single: {
-                                        appModel.selectedLane = laneIndex
-                                        appModel.selectedItem = index
-                                    },
-                                    double: {
-                                        appModel.detailTarget = CursorPosition(lane: laneIndex, item: index)
-                                    }
-                                ))
-                                .contextMenu {
-                                    Button("Delete Issue…", role: .destructive) {
-                                        appModel.deleteTarget = DeleteTarget(
-                                            content: .jiraIssue(account: account, board: model, issue: issue)
-                                        )
-                                    }
-                                }
+                            if placeholderIndex == index {
+                                PlaceholderGap()
+                            }
+                            jiraCard(issue, isSelected: isSelected && appModel.selectedItem == index, laneIndex: laneIndex)
+                        }
+                        if let p = placeholderIndex, p >= issues.count {
+                            PlaceholderGap()
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -226,8 +230,149 @@ private struct JiraBoardContent: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(isSelected ? Color.accentColor : Color(nsColor: .separatorColor).opacity(0.5), lineWidth: isSelected ? 1.5 : 1)
+                .strokeBorder(
+                    isSelected || isDropTarget
+                        ? Color.accentColor.opacity(isSelected ? 0.85 : 0.55)
+                        : Color(nsColor: .separatorColor).opacity(0.5),
+                    lineWidth: isSelected || isDropTarget ? 1.5 : 1
+                )
         )
+        .background(laneFrameReporter(status))
+    }
+
+    /// One card, with drag-and-drop: the floating copy, distortion, and
+    /// settle animation come from the shared machinery in BoardView.
+    @ViewBuilder
+    private func jiraCard(_ issue: JiraIssue, isSelected: Bool, laneIndex: Int) -> some View {
+        let dragging = appModel.drag?.itemID == issue.key && appModel.drag?.settling == false
+        JiraCardView(issue: issue, isSelected: isSelected)
+            .opacity(dragging ? 0.15 : 1)
+            .gesture(boardDragGesture(itemID: issue.key, appModel: appModel, config: dragConfig(for: issue)))
+            .background(cardFrameReporter(issue))
+            .modifier(InstantTap(
+                single: {
+                    appModel.selectedLane = laneIndex
+                    appModel.selectedItem = issues(inStatusIndexOf: laneIndex).firstIndex(where: { $0.key == issue.key }) ?? 0
+                },
+                double: {
+                    appModel.selectedLane = laneIndex
+                    appModel.selectedItem = issues(inStatusIndexOf: laneIndex).firstIndex(where: { $0.key == issue.key }) ?? 0
+                    appModel.detailTarget = CursorPosition(lane: laneIndex, item: appModel.selectedItem)
+                }
+            ))
+            .contextMenu {
+                Button("Edit Issue…") {
+                    appModel.editTarget = EditIssueTarget(
+                        content: .jiraIssue(account: account, board: model, issue: issue)
+                    )
+                }
+                Button("Delete Issue…", role: .destructive) {
+                    appModel.deleteTarget = DeleteTarget(
+                        content: .jiraIssue(account: account, board: model, issue: issue)
+                    )
+                }
+            }
+    }
+
+    private func issues(inStatusIndexOf laneIndex: Int) -> [JiraIssue] {
+        guard model.statuses.indices.contains(laneIndex) else { return [] }
+        return model.issues(inStatus: model.statuses[laneIndex].name)
+    }
+
+    /// Where the placeholder gap renders in this lane (nil = no drop here).
+    /// Cross-lane only — the dragged card isn't in this lane's list, so the
+    /// insertion index maps directly onto the visible cards.
+    private func insertionIndex(laneIndex: Int) -> Int? {
+        guard let d = appModel.drag, !d.settling, let ins = d.insertion,
+              ins.lane == laneIndex else { return nil }
+        return ins.index
+    }
+
+    /// Hit-test the pointer against lane/card frames in board space.
+    /// Same-lane drags return nil: the remote API can't reorder within a
+    /// lane, so the card just settles back where it came from.
+    private func computeInsertion(location: CGPoint, excluding itemID: String) -> DragInsertion? {
+        guard model.statuses.count > 0 else { return nil }
+        var laneHit: (index: Int, frame: CGRect)?
+        for (i, status) in model.statuses.enumerated() {
+            guard let f = laneFrames[status.id] else { continue }
+            if location.x >= f.minX - 6 && location.x <= f.maxX + 6 {
+                laneHit = (i, f)
+                break
+            }
+        }
+        guard let hit = laneHit else { return nil }
+        // Same-lane drop: not supported remotely.
+        if model.issues(inStatus: model.statuses[hit.index].name).contains(where: { $0.key == itemID }) {
+            return nil
+        }
+        let cards = model.issues(inStatus: model.statuses[hit.index].name)
+        var index = cards.count
+        for (j, card) in cards.enumerated() {
+            guard let cf = cardFrames[card.key] else { continue }
+            if location.y < cf.midY {
+                index = j
+                break
+            }
+        }
+        return DragInsertion(lane: hit.index, index: index)
+    }
+
+    /// Board-specific drop behavior: optimistic transition to the target
+    /// status lane; cursor follows the dropped card.
+    private func dragConfig(for issue: JiraIssue) -> BoardDragConfig {
+        BoardDragConfig(
+            computeInsertion: { location, itemID in
+                computeInsertion(location: location, excluding: itemID)
+            },
+            commit: { ins in
+                guard model.statuses.indices.contains(ins.lane) else { return }
+                let target = model.statuses[ins.lane].name
+                Task { @MainActor in _ = await model.transition(issueKey: issue.key, toStatus: target) }
+            },
+            select: { ins in
+                appModel.selectedLane = ins.lane
+                DispatchQueue.main.async {
+                    let list = self.issues(inStatusIndexOf: ins.lane)
+                    appModel.selectedItem = list.firstIndex(where: { $0.key == issue.key }) ?? 0
+                }
+            }
+        )
+    }
+
+    /// The floating dragged card, following the pointer with speed-based
+    /// distortion, mirroring the local board's copy.
+    @ViewBuilder
+    private var floatingCard: some View {
+        if let drag = appModel.drag,
+           let frame = cardFrames[drag.itemID],
+           let issue = model.issues.first(where: { $0.key == drag.itemID }) {
+            JiraCardView(issue: issue, isSelected: false)
+                .frame(width: frame.width)
+                .modifier(CardDistortion(vx: drag.smoothedVX))
+                .offset(CGSize(width: frame.minX + drag.offset.width, height: frame.minY + drag.offset.height))
+                .shadow(color: .black.opacity(0.28 * (drag.settling ? drag.settleOpacity : 1)), radius: 9, y: 5)
+                .opacity(drag.settling ? drag.settleOpacity : 1)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func laneFrameReporter(_ status: JiraStatus) -> some View {
+        GeometryReader { geo in
+            Color.clear.preference(
+                key: LaneFramesKey.self,
+                value: [status.id: geo.frame(in: .named("board"))]
+            )
+        }
+    }
+
+    private func cardFrameReporter(_ issue: JiraIssue) -> some View {
+        GeometryReader { geo in
+            Color.clear.preference(
+                key: CardFramesKey.self,
+                value: [issue.key: geo.frame(in: .named("board"))]
+            )
+        }
     }
 
     private func color(for status: JiraStatus) -> Color {

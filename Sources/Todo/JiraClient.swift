@@ -116,6 +116,7 @@ final class JiraClient {
             let description: ADFDocument?
             let status: Status
             let issuetype: IssueType
+            let priority: Priority?
             let assignee: Assignee?
             let updated: String?
             struct Status: Decodable {
@@ -128,6 +129,7 @@ final class JiraClient {
                 let iconURL: String?
                 enum CodingKeys: String, CodingKey { case name; case iconURL = "iconUrl" }
             }
+            struct Priority: Decodable { let name: String }
             struct Assignee: Decodable {
                 let displayName: String?
                 let accountID: String?
@@ -142,7 +144,7 @@ final class JiraClient {
         let total: Int?
     }
 
-    func search(jql: String, maxResults: Int = 100, fields: [String] = ["summary", "description", "status", "issuetype", "assignee", "updated"]) async throws -> SearchResponse {
+    func search(jql: String, maxResults: Int = 100, fields: [String] = ["summary", "description", "status", "issuetype", "assignee", "priority", "updated"]) async throws -> SearchResponse {
         let body = try jsonBody(SearchRequest(jql: jql, maxResults: maxResults, fields: fields, nextPageToken: nil))
         let req = try request("POST", "/rest/api/3/search/jql", body: body)
         return try await send(req, as: SearchResponse.self)
@@ -365,6 +367,52 @@ final class JiraClient {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw JiraError.http(code, "add to sprint failed")
+        }
+    }
+
+    /// Remove an issue from a sprint (it drops back to the backlog).
+    func removeIssueFromSprint(sprintID: Int, issueKey: String) async throws {
+        struct Payload: Encodable { let issues: [String] }
+        let data = try jsonBody(Payload(issues: [issueKey]))
+        let req = try request("DELETE", "/rest/agile/1.0/sprint/\(sprintID)/issue", body: data)
+        let (_, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw JiraError.http(code, "remove from sprint failed")
+        }
+    }
+
+    /// Whether an issue currently sits in a given sprint. Uses search (one
+    /// request) rather than the agile issue endpoint.
+    func issueInSprint(issueKey: String, sprintID: Int) async -> Bool {
+        let jql = "key = \(issueKey) AND sprint = \(sprintID)"
+        let resp = try? await search(jql: jql, maxResults: 1, fields: ["key"])
+        return resp?.issues?.isEmpty == false
+    }
+
+    // MARK: API: edit issue
+
+    /// Partial issue update. The double optionals distinguish "don't touch
+    /// this field" (nil) from "clear it" (.some(nil)): synthesized Codable
+    /// omits the former and encodes an explicit JSON null for the latter.
+    struct JiraEditFields: Encodable {
+        let summary: String
+        let description: ADFDocument
+        var priority: [String: String]??
+        var assignee: [String: String]??
+    }
+
+    /// PUT the editable issue fields (summary, description, assignee,
+    /// priority). Omitted fields keep their current server value. The API
+    /// answers 204 No Content — status-only check, like deleteIssue.
+    func editIssue(key: String, fields: JiraEditFields) async throws {
+        struct EditBody: Encodable { let fields: JiraClient.JiraEditFields }
+        let data = try jsonBody(EditBody(fields: fields))
+        let req = try request("PUT", "/rest/api/3/issue/\(key)", body: data)
+        let (_, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw JiraError.http(code, "edit failed")
         }
     }
 

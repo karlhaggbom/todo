@@ -102,12 +102,23 @@ public struct RootView: View {
                 detailSheet(content)
             }
         }
+        .sheet(item: $model.issueDetailTarget) { target in
+            detailSheet(target.content)
+        }
         .sheet(item: $model.createTarget) { target in
             switch target.content {
             case .jiraIssue(let account, let board):
                 CreateIssueSheet(account: account, board: board)
             case .githubIssue(let account, let board):
                 CreateGitHubIssueSheet(account: account, board: board)
+            }
+        }
+        .sheet(item: $model.editTarget) { target in
+            switch target.content {
+            case .jiraIssue(let account, let board, let issue):
+                CreateIssueSheet(account: account, board: board, editing: issue)
+            case .githubIssue(let account, let board, let issue):
+                CreateGitHubIssueSheet(account: account, board: board, editing: issue)
             }
         }
         .sheet(item: $model.deleteTarget) { target in
@@ -195,8 +206,16 @@ public struct RootView: View {
                     model.detailTarget = nil
                     return nil
                 }
+                if model.issueDetailTarget != nil {
+                    model.issueDetailTarget = nil
+                    return nil
+                }
                 if model.createTarget != nil {
                     model.createTarget = nil
+                    return nil
+                }
+                if model.editTarget != nil {
+                    model.editTarget = nil
                     return nil
                 }
                 if model.deleteTarget != nil {

@@ -63,6 +63,15 @@ struct GitHubIssueDetailView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
             Spacer()
+            Button("Edit") {
+                dismiss()
+                DispatchQueue.main.async {
+                    appModel.editTarget = EditIssueTarget(content: .githubIssue(
+                        account: account, board: board, issue: currentIssue
+                    ))
+                }
+            }
+            .buttonStyle(.borderless)
             stateCapsule
         }
         .padding(12)
