@@ -22,6 +22,11 @@ struct TicketDetailView: View {
     @State private var mentionFilter: String?       // nil = not in @-mention mode
     @State private var editingCommentID: String?
     @State private var editCommentText = ""
+    /// Created-timestamp of the comment that triggered this activity —
+    /// the detail view accents it (and the activity pages mark the
+    /// issue read when the sheet closes). nil when opened from a board.
+    var highlightCommentAt: String? = nil
+
     /// Mentions recovered from the comment being edited so untouched
     /// @Name tokens re-encode as real mention nodes on save.
     @State private var editMentions: [String: String] = [:]
@@ -112,6 +117,7 @@ struct TicketDetailView: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if let banner = statusBanner {
@@ -187,8 +193,26 @@ struct TicketDetailView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(
                                     RoundedRectangle(cornerRadius: 6)
-                                        .fill(Color(nsColor: .controlBackgroundColor))
+                                        .fill(comment.created == highlightCommentAt
+                                              ? Color.accentColor.opacity(0.08)
+                                              : Color(nsColor: .controlBackgroundColor))
                                 )
+                                // The comment that surfaced this issue in the
+                                // activity feed: accent ring + left bar.
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(comment.created == highlightCommentAt
+                                                ? Color.accentColor.opacity(0.55) : .clear, lineWidth: 1)
+                                )
+                                .overlay(alignment: .leading) {
+                                    if comment.created == highlightCommentAt {
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .fill(Color.accentColor)
+                                            .frame(width: 3)
+                                            .padding(.vertical, 3)
+                                    }
+                                }
+                                .id(comment.id)
                                 .contextMenu {
                                     Button("Edit Comment…") {
                                         startEditingComment(comment)
@@ -202,6 +226,24 @@ struct TicketDetailView: View {
                     }
                 }
                 .padding(14)
+            }
+            // Once comments load, bring the highlighted comment into
+            // view — a long description or comment history can push it
+            // below the fold. Newest-first order usually puts it at the
+            // top of the list already, so this is just insurance.
+            .onChange(of: comments, initial: true) { _, _ in
+                guard let at = highlightCommentAt,
+                      let match = comments.first(where: { $0.created == at }) else { return }
+                // The sheet content only mounts after load() finishes
+                // (loading spinner branch), so a plain onChange would miss
+                // the initial set — `initial: true` fires on appearance.
+                // And scrollTo during the same transaction no-ops — the
+                // rows have no geometry yet — so give layout a beat.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    proxy.scrollTo(match.id, anchor: .top)
+                }
+            }
             }
 
             commentComposer

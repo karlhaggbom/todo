@@ -47,13 +47,27 @@ struct EditIssueTarget: Identifiable {
     let content: Content
 }
 
+/// What the activity feed knows about the entry the user clicked:
+/// its reason, when it happened, and who did it — so the detail sheet
+/// can highlight what actually changed (e.g. accent the new comment
+/// and scroll to it).
+struct ActivityHighlight: Equatable {
+    let reason: ActivityReason
+    let at: String
+    let actor: String?
+}
+
 /// Direct issue-detail sheet target. Unlike `detailTarget` (a cursor
 /// position resolved by the active board), this carries the content
-/// itself — used from the mentions pages, which have no board context
-/// to resolve from.
+/// itself — used from the activity pages, which have no board context
+/// to resolve from. Opening from an activity row also carries the
+/// row's read key: the issue is marked read when the SHEET CLOSES, not
+/// when it's clicked, so the row stays visually fresh while browsing.
 struct IssueDetailTarget: Identifiable {
     let id = UUID()
     let content: DetailSheetContent
+    var readKey: String? = nil
+    var highlight: ActivityHighlight? = nil
 }
 
 // MARK: - Keyboard navigation abstraction

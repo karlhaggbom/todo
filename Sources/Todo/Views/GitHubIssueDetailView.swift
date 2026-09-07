@@ -26,6 +26,11 @@ struct GitHubIssueDetailView: View {
     @State private var mentionKeyMonitor: Any?
     @State private var statusBanner: String?
 
+    /// Created-timestamp of the comment that triggered this activity —
+    /// accented and scrolled into view (comments render oldest-first, so
+    /// the new one sits at the bottom). nil when opened from a board.
+    var highlightCommentAt: String? = nil
+
     private var currentIssue: GitHubIssue { detail ?? issue }
 
     var body: some View {
@@ -110,6 +115,7 @@ struct GitHubIssueDetailView: View {
                     .padding(.horizontal, 12).padding(.top, 8)
             }
 
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     transitionPicker
@@ -176,8 +182,26 @@ struct GitHubIssueDetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(Color(nsColor: .textBackgroundColor))
+                                .fill(comment.createdAt == highlightCommentAt
+                                      ? Color.accentColor.opacity(0.08)
+                                      : Color(nsColor: .textBackgroundColor))
                         )
+                        // The comment that surfaced this issue in the
+                        // activity feed: accent ring + left bar + scroll.
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(comment.createdAt == highlightCommentAt
+                                        ? Color.accentColor.opacity(0.55) : .clear, lineWidth: 1)
+                        )
+                        .overlay(alignment: .leading) {
+                            if comment.createdAt == highlightCommentAt {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(Color.accentColor)
+                                    .frame(width: 3)
+                                    .padding(.vertical, 3)
+                            }
+                        }
+                        .id(comment.id)
                         .contextMenu {
                             Button("Edit Comment…") {
                                 editCommentText = comment.body
@@ -190,6 +214,23 @@ struct GitHubIssueDetailView: View {
                     }
                 }
                 .padding(12)
+            }
+            // Once comments load, bring the highlighted (newest) comment
+            // into view — comments render oldest-first, so it's at the
+            // bottom without this.
+            .onChange(of: comments, initial: true) { _, _ in
+                guard let at = highlightCommentAt,
+                      let match = comments.last(where: { $0.createdAt == at }) else { return }
+                // The sheet content only mounts after load() finishes
+                // (loading spinner branch), so a plain onChange would miss
+                // the initial set — `initial: true` fires on appearance.
+                // And scrollTo during the same transaction no-ops — the
+                // rows have no geometry yet — so give layout a beat.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    proxy.scrollTo(match.id, anchor: .center)
+                }
+            }
             }
             commentComposer
         }

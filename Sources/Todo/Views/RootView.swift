@@ -125,7 +125,13 @@ public struct RootView: View {
             }
         }
         .sheet(item: $model.issueDetailTarget) { target in
-            detailSheet(target.content)
+            detailSheet(target.content, highlight: target.highlight)
+                // Activity rows become read when the sheet CLOSES, not when
+                // clicked — one visit per row, marked however the sheet
+                // ends (Esc, background click, edit handoff, …).
+                .onDisappear {
+                    if let key = target.readKey { store.markIssueRead(key) }
+                }
         }
         .sheet(item: $model.createTarget) { target in
             switch target.content {
@@ -165,14 +171,16 @@ public struct RootView: View {
     public init() {}
 
     @ViewBuilder
-    private func detailSheet(_ content: DetailSheetContent) -> some View {
+    private func detailSheet(_ content: DetailSheetContent, highlight: ActivityHighlight? = nil) -> some View {
         switch content {
         case .localTask(let task):
             TaskDetailView(task: task)
         case .jiraTicket(let account, let board, let issue):
-            TicketDetailView(account: account, board: board, issue: issue)
+            TicketDetailView(account: account, board: board, issue: issue,
+                             highlightCommentAt: highlight?.reason == .comment ? highlight?.at : nil)
         case .githubIssue(let account, let board, let issue):
-            GitHubIssueDetailView(account: account, board: board, issue: issue)
+            GitHubIssueDetailView(account: account, board: board, issue: issue,
+                                 highlightCommentAt: highlight?.reason == .comment ? highlight?.at : nil)
         }
     }
 

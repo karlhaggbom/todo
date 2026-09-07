@@ -152,15 +152,18 @@ private struct GitHubActivityContent: View {
         }
     }
 
-    /// Mark the activity read and open its detail sheet. An ephemeral board
-    /// model supplies the detail view's client and optimistic-update hooks
-    /// without touching any real board's state.
+    /// Open the detail sheet. The read key rides along: the issue becomes
+    /// read only when the sheet closes (not on click, so the row stays
+    /// visually fresh while browsing). An ephemeral board model supplies
+    /// the detail view's client and optimistic-update hooks without
+    /// touching any real board's state.
     private func open(_ entry: GitHubActivityEntry) {
-        store.markIssueRead(entry.readKey)
         let board = GitHubBoardModel(account: model.account, repo: entry.repo, token: model.token)
-        appModel.issueDetailTarget = IssueDetailTarget(content: .githubIssue(
-            account: model.account, board: board, issue: entry.issue
-        ))
+        appModel.issueDetailTarget = IssueDetailTarget(
+            content: .githubIssue(account: model.account, board: board, issue: entry.issue),
+            readKey: entry.readKey,
+            highlight: ActivityHighlight(reason: entry.reason, at: entry.activityAt, actor: entry.actor)
+        )
     }
 }
 
