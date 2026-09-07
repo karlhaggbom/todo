@@ -313,7 +313,7 @@ final class GitHubActivityModel: ObservableObject {
         lastError = nil
         do {
             var byId: [String: GitHubActivityEntry] = [:]
-            // One GraphQL request covers all repos' three searches; the
+            // One GraphQL request covers all repos' four searches; the
             // per-repo REST searches remain as a fallback (e.g. GitHub
             // Enterprise without GraphQL enabled).
             let hits: [GitHubClient.GitHubActivityHit]
@@ -323,17 +323,19 @@ final class GitHubActivityModel: ObservableObject {
                 Diag.log.error("graphql activity search failed, falling back to REST: \(error.localizedDescription, privacy: .public)")
                 hits = try await restActivitySearch()
             }
-            for hit in hits {
+            for hit in hits where hit.reason != .owned {
                 let entry = GitHubActivityEntry(
                     reason: hit.reason, repo: hit.repo, issue: hit.issue,
                     activityAt: hit.issue.updatedAt, actor: nil
                 )
                 byId[entry.id] = byId[entry.id].map { GitHubActivityEntry.newest($0, entry) } ?? entry
             }
-            // Deeper analysis only for the assigned hits: what did other
-            // people do on my issues/PRs?
-            for hit in hits where hit.reason == .assigned {
-                if let entry = await assignedEntry(hit.issue, in: hit.repo) {
+            // Deeper analysis for the assigned AND owned hits: what did
+            // other people do on my issues/PRs?
+            for item in Self.analysisPlan(hits) {
+                if let entry = await analyzedEntry(
+                    item.hit, fallbackAssigned: item.fallbackAssigned
+                ) {
                     byId[entry.id] = byId[entry.id].map { GitHubActivityEntry.newest($0, entry) } ?? entry
                 }
             }
@@ -370,6 +372,8 @@ final class GitHubActivityModel: ObservableObject {
             hits += mentions.map { GitHubClient.GitHubActivityHit(repo: repo, reason: .mention, issue: $0) }
             hits += assigned.map { GitHubClient.GitHubActivityHit(repo: repo, reason: .assigned, issue: $0) }
             hits += reviews.map { GitHubClient.GitHubActivityHit(repo: repo, reason: .reviewRequested, issue: $0) }
+            let owned = (try? await client.issuesOwned(owner: repo.owner, repo: repo.repo, login: account.login)) ?? []
+            hits += owned.map { GitHubClient.GitHubActivityHit(repo: repo, reason: .owned, issue: $0) }
         }
         return hits
     }
@@ -378,16 +382,40 @@ final class GitHubActivityModel: ObservableObject {
     /// change, or — with no other activity — the assignment itself.
     /// Returns nil when the only activity is my own (self-assignment,
     /// my own edits): own updates must never create feed entries.
-    private func assignedEntry(_ issue: GitHubIssue, in repo: GitHubRepo) async -> GitHubActivityEntry? {
+    /// Which hits need the deeper per-issue analysis (comments +
+    /// events): the assigned and owned ones, deduped by repo+number —
+    /// the first hit wins, and the query puts assigned before owned so
+    /// an issue that's both keeps the "assigned" fallback (owned-only
+    /// issues need other-people activity to earn a feed entry at all).
+    /// Pure — unit-tested.
+    static func analysisPlan(
+        _ hits: [GitHubClient.GitHubActivityHit]
+    ) -> [(hit: GitHubClient.GitHubActivityHit, fallbackAssigned: Bool)] {
+        var seen: Set<String> = []
+        var plan: [(GitHubClient.GitHubActivityHit, Bool)] = []
+        for hit in hits where hit.reason == .assigned || hit.reason == .owned {
+            let key = "\(hit.repo.id)#\(hit.issue.number)"
+            guard seen.insert(key).inserted else { continue }
+            plan.append((hit, hit.reason == .assigned))
+        }
+        return plan
+    }
+
+    private func analyzedEntry(
+        _ hit: GitHubClient.GitHubActivityHit, fallbackAssigned: Bool
+    ) async -> GitHubActivityEntry? {
+        let issue = hit.issue, repo = hit.repo
         // Issues untouched for a month can't hold recent activity — skip
-        // their two per-issue API calls entirely (the entry stays, as the
-        // plain assignment).
+        // their two per-issue API calls entirely. Assigned keeps the
+        // plain assignment entry; owned drops out (no other-people
+        // activity possible).
         if let updated = parseActivityDate(issue.updatedAt),
            Date().timeIntervalSince(updated) > 30 * 24 * 3600 {
-            return GitHubActivityEntry(
-                reason: .assigned, repo: repo, issue: issue,
-                activityAt: issue.updatedAt, actor: nil
-            )
+            return fallbackAssigned
+                ? GitHubActivityEntry(
+                    reason: .assigned, repo: repo, issue: issue,
+                    activityAt: issue.updatedAt, actor: nil
+                ) : nil
         }
         let comments = (try? await client.comments(owner: repo.owner, repo: repo.repo, number: issue.number)) ?? []
         let events = (try? await client.issueEvents(owner: repo.owner, repo: repo.repo, number: issue.number)) ?? []
@@ -416,15 +444,18 @@ final class GitHubActivityModel: ObservableObject {
                 activityAt: latest.createdAt, actor: latest.actor?.login
             )
         }
-        // Nothing by anyone else: the assignment itself is the activity —
-        // unless the last assigned-to-me event was performed by me.
+        // Nothing by anyone else. Owned-only issues drop out — just
+        // authoring something isn't feed-worthy. For assigned ones the
+        // assignment itself is the activity — unless the last
+        // assigned-to-me event was performed by me.
+        guard fallbackAssigned else { return nil }
         let assignedToMe = events.filter { $0.event == "assigned" && $0.assignee?.login.lowercased() == myLogin }
         if let last = Self.latest(assignedToMe, by: { $0.createdAt }), isMe(last.actor?.login) {
             return nil // self-assigned: my own action, not activity
         }
         return GitHubActivityEntry(
             reason: .assigned, repo: repo, issue: issue,
-            activityAt: issue.updatedAt ?? "",
+            activityAt: issue.updatedAt,
             actor: Self.latest(assignedToMe, by: { $0.createdAt })?.actor?.login
         )
     }

@@ -32,6 +32,7 @@ struct ActivityReasonTag: View {
         case .comment: return "text.bubble"
         case .change: return "pencil.line"
         case .reviewRequested: return "eye"
+        case .owned: return "person"
         }
     }
 
@@ -47,6 +48,8 @@ struct ActivityReasonTag: View {
             return actor.map { "Updated by \($0)" } ?? "Updated"
         case .reviewRequested:
             return "Review requested"
+        case .owned:
+            return "Yours"
         }
     }
 
@@ -67,6 +70,7 @@ private extension ActivityReason {
         case .comment: return "Someone commented on your issue"
         case .change: return "Someone updated your issue"
         case .reviewRequested: return "Your review is requested"
+        case .owned: return "You authored this issue or PR"
         }
     }
 }

@@ -203,6 +203,11 @@ final class GitHubClient {
         try await issueSearch("repo:\(owner)/\(repo)+is:pr+is:open+review-requested:\(login)")
     }
 
+    /// Issues AND pull requests authored by the user.
+    func issuesOwned(owner: String, repo: String, login: String) async throws -> [GitHubIssue] {
+        try await issueSearch("repo:\(owner)/\(repo)+author:\(login)")
+    }
+
     /// Shared search/issues query (issues and PRs live in the same index).
     private func issueSearch(_ q: String) async throws -> [GitHubIssue] {
         let path = "/search/issues?q=\(q)&per_page=50&sort=updated"
@@ -247,10 +252,16 @@ final class GitHubClient {
         var fields: [String] = []
         for (i, repo) in repos.enumerated() {
             let full = "\(repo.owner)/\(repo.repo)"
+            // sort:updated-desc keeps the 50-per-search cap honest for
+            // a feed: most recently touched issues win, not "best match".
             let specs: [(String, String, ActivityReason)] = [
-                ("m\(i)", "repo:\(full) is:issue mentions:\(safe)", .mention),
-                ("a\(i)", "repo:\(full) assignee:\(safe)", .assigned),
-                ("r\(i)", "repo:\(full) is:pr is:open review-requested:\(safe)", .reviewRequested),
+                ("m\(i)", "repo:\(full) is:issue mentions:\(safe) sort:updated-desc", .mention),
+                ("a\(i)", "repo:\(full) assignee:\(safe) sort:updated-desc", .assigned),
+                ("r\(i)", "repo:\(full) is:pr is:open review-requested:\(safe) sort:updated-desc", .reviewRequested),
+                // Issues AND PRs authored by the user — comments on
+                // one's own work should surface even without an
+                // assignment or mention.
+                ("o\(i)", "repo:\(full) author:\(safe) sort:updated-desc", .owned),
             ]
             for spec in specs {
                 aliases.append((spec.0, repo, spec.2))

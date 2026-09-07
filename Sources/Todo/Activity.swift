@@ -14,6 +14,11 @@ enum ActivityReason: String, Codable, Hashable {
     case comment
     case change
     case reviewRequested
+    /// Issues/PRs authored by the user (GitHub only) — never a feed
+    /// reason on its own; it just marks which hits need per-issue
+    /// analysis so other people's comments/changes on the user's own
+    /// work surface as .comment/.change entries.
+    case owned
 }
 
 /// Jira timestamps arrive as "2026-09-04T08:00:00.000+0000" (fractional,
