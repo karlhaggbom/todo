@@ -80,3 +80,15 @@ import Foundation
     #expect(abs(AppPreferences.activityLastFull(scope: a)!.timeIntervalSince(early)) < 0.001)
     UserDefaults.standard.removeObject(forKey: "activity-lastfull-\(a)")
 }
+
+@Test func activityLastFetchPersistsPerScope() {
+    let a = "test-lastfetch-\(UUID().uuidString)"
+    let b = "test-lastfetch-\(UUID().uuidString)"
+    #expect(AppPreferences.activityLastFetch(scope: a) == nil)
+    let when = Date(timeIntervalSince1970: 1_700_000_000)
+    AppPreferences.setActivityLastFetch(when, scope: a)
+    // Round-trips; a different scope stays untouched.
+    #expect(AppPreferences.activityLastFetch(scope: b) == nil)
+    #expect(abs(AppPreferences.activityLastFetch(scope: a)!.timeIntervalSince(when)) < 0.001)
+    UserDefaults.standard.removeObject(forKey: "activity-lastfetch-\(a)")
+}

@@ -385,20 +385,28 @@ final class ActivityModel: ObservableObject {
         lastError = nil
         do {
             let me = try await client.myself()
-            // Full refreshes run at launch (no lastFull recorded), hourly
-            // after that, and whenever the user forces one. Everything in
-            // between is a DELTA: only issues updated in the last 15
-            // minutes are searched and re-analyzed. The relative JQL form
-            // is evaluated against Jira's clock, so there is no timezone
-            // or clock-skew risk — and a poll every ~5 minutes re-doing up
-            // to 15 minutes of updates is harmless. A delta cannot detect
-            // removals (unassigned from me, mention edited away); the
-            // hourly full refresh reaps those.
+            // Full refreshes run on force-refresh, when the feed is empty
+            // (nothing to merge into), when the last full is over an hour
+            // old (deltas can't detect removals — unassigned from me,
+            // mention edited away), and when the gap since the last
+            // successful fetch exceeds a day. Everything else is a DELTA
+            // that scales its window to everything missed since that last
+            // successful fetch — which persists across app restarts and
+            // machine shutdowns, so time with Todo closed still gets
+            // picked up. The relative JQL form is evaluated against
+            // Jira's clock, so there is no timezone or clock-skew risk.
             let lastFull = AppPreferences.activityLastFull(scope: cacheKey)
+            let sinceFull = lastFull.map { Date().timeIntervalSince($0) }
+            let sinceFetch = AppPreferences.activityLastFetch(scope: cacheKey)
+                .map { Date().timeIntervalSince($0) }
+            let deltaMinutes = Self.deltaMinutes(sinceFetch: sinceFetch)
             let needsFull = force
-                || lastFull == nil
-                || Date().timeIntervalSince(lastFull!) > 3600
-            let deltaFilter = needsFull ? "" : " AND updated >= \"-15m\""
+                || deltaMinutes == nil
+                || sinceFull == nil
+                || activity.isEmpty
+                || sinceFull! > 3600
+            let deltaFilter = needsFull
+                ? "" : " AND updated >= \"-\(deltaMinutes!)m\""
             // Two searches in parallel: mentions, and everything assigned
             // to me (ownership proxy for "changes/comments on my tickets").
             // Escape quotes/backslashes for the phrase search so display
@@ -456,12 +464,25 @@ final class ActivityModel: ObservableObject {
             if let cache, let data = try? JSONEncoder().encode(fresh) {
                 cache.storeCachedData(data, for: cacheKey)
             }
+            // Both full and delta loads, on success, advance the fetch
+            // marker; failures must leave it alone so the next tick
+            // re-covers the gap.
+            AppPreferences.setActivityLastFetch(Date(), scope: cacheKey)
             if needsFull { AppPreferences.setActivityLastFull(Date(), scope: cacheKey) }
             Diag.log.info("activity loaded entries=\(fresh.count, privacy: .public) delta=\(!needsFull, privacy: .public)")
         } catch {
             lastError = error.localizedDescription
         }
         isLoading = false
+    }
+
+    /// The delta window in minutes: everything missed since the last
+    /// successful fetch, plus a small overlap, at least the 15-minute
+    /// floor. nil = do a full refresh instead (never fetched, or the
+    /// gap is over a day). Pure — unit-tested.
+    static func deltaMinutes(sinceFetch: TimeInterval?) -> Int? {
+        guard let sinceFetch, sinceFetch <= 24 * 3600 else { return nil }
+        return max(15, Int(sinceFetch / 60) + 5)
     }
 
     /// Merge freshly-computed entries into the known set: one entry per

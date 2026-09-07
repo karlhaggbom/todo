@@ -41,4 +41,17 @@ enum AppPreferences {
     static func setActivityLastFull(_ date: Date, scope: String) {
         defaults.set(date.timeIntervalSince1970, forKey: "activity-lastfull-\(scope)")
     }
+
+    /// When the last SUCCESSFUL activity load completed (delta or full).
+    /// Survives app restarts and machine shutdowns, so the first tick
+    /// after a gap queries everything missed while Todo wasn't running.
+    /// Only updated on success — a failed tick must not advance it.
+    static func activityLastFetch(scope: String) -> Date? {
+        let raw = defaults.double(forKey: "activity-lastfetch-\(scope)")
+        return raw > 0 ? Date(timeIntervalSince1970: raw) : nil
+    }
+
+    static func setActivityLastFetch(_ date: Date, scope: String) {
+        defaults.set(date.timeIntervalSince1970, forKey: "activity-lastfetch-\(scope)")
+    }
 }

@@ -168,3 +168,24 @@ private func jiraDeltaEntry(key: String, at: String, reason: ActivityReason) -> 
     #expect(merged.count == 1)
     #expect(merged[0].reason == .comment)
 }
+
+// MARK: Delta window sizing (Jira activity)
+
+@Test func deltaWindowCoversTheGapSinceTheLastSuccessfulFetch() {
+    // Fresh install / marker lost: full refresh.
+    #expect(ActivityModel.deltaMinutes(sinceFetch: nil) == nil)
+    // Gap beyond a day: full refresh.
+    #expect(ActivityModel.deltaMinutes(sinceFetch: 24 * 3600 + 60) == nil)
+    // Short gaps get the 15-minute floor (plus overlap margin).
+    #expect(ActivityModel.deltaMinutes(sinceFetch: 0) == 15)
+    #expect(ActivityModel.deltaMinutes(sinceFetch: 5 * 60) == 15)
+    // The window scales to the actual gap: 40 minutes off ->
+    // 45-minute window, nothing missed.
+    #expect(ActivityModel.deltaMinutes(sinceFetch: 40 * 60) == 45)
+    // Overnight (10h) still delta, not full.
+    #expect(ActivityModel.deltaMinutes(sinceFetch: 10 * 3600) == 10 * 60 + 5)
+    // Monotonic: bigger gaps never shrink the window.
+    let small = ActivityModel.deltaMinutes(sinceFetch: 3600)!
+    let large = ActivityModel.deltaMinutes(sinceFetch: 4 * 3600)!
+    #expect(large > small)
+}
